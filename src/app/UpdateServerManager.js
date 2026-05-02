@@ -9,6 +9,10 @@ module.exports = class UpdateServerManager {
     constructor(applicationUpdateURL, logger) {
         try {
             this._logger = logger || new ConsoleLogger(ConsoleLogger.LEVEL.Warn);
+            if(!applicationUpdateURL || applicationUpdateURL === 'DISABLED') {
+                this._applicationUpdateURL = undefined;
+                return;
+            }
             // NOTE: simple hack to check if URL is valid (must not throw error)
             url.parse(applicationUpdateURL, true).hostname.length;
             this._applicationUpdateURL = applicationUpdateURL;

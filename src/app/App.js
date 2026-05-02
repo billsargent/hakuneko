@@ -71,7 +71,10 @@ module.exports = class App {
             }
             await this._electron.launch();
             await this._electron.loadHTML(loadingPage);
-            await this._updater.updateCache(this._configuration.publicKey);
+            // Only check for remote updates when an update URL is configured
+            if(this._configuration.applicationUpdateURL && this._configuration.applicationUpdateURL !== 'DISABLED') {
+                await this._updater.updateCache(this._configuration.publicKey);
+            }
             this._electron.loadURL(this._configuration.applicationStartupURL);
         } catch(error) {
             this._logger.error('Failed to start application!', error);
