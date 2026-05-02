@@ -350,12 +350,10 @@
              */
             async onImportUrlsClick(e) {
                 console.log('Import URLs clicked');
-                let importQueue = document.querySelector('hakuneko-import-queue');
-                if (!importQueue) {
-                    console.error('Import queue component not found!');
-                    return;
-                }
-                await importQueue.openFilePicker();
+                this.dispatchEvent(new CustomEvent('import-urls', {
+                    bubbles: true,
+                    composed: true
+                }));
             }
 
             /**

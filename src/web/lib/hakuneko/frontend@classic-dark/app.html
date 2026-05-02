@@ -156,6 +156,21 @@
                 // load settings in case UI was not ready when the settings were loaded and event was fired
                 this.readerEnabled = Engine.Settings.readerEnabled.value;
                 Engine.Settings.addEventListener('saved', this.onSettingsSaved.bind(this));
+                // listen for import-urls event dispatched from mangas component
+                this.addEventListener('import-urls', this._onImportUrls.bind(this));
+            }
+
+            /**
+             * Handle Import URLs button click from mangas component.
+             * Uses shadowRoot.querySelector because the import-queue element lives in this shadow DOM.
+             */
+            _onImportUrls(e) {
+                let importQueue = this.shadowRoot.querySelector('hakuneko-import-queue');
+                if (importQueue) {
+                    importQueue.openFilePicker();
+                } else {
+                    console.error('Import queue component not found in app shadow DOM!');
+                }
             }
 
             /**
