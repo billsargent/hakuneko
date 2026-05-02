@@ -274,6 +274,9 @@ module.exports = class ElectronBootstrap {
         this._window.on('maximize', this._mainWindowRestoreHandler.bind(this));
         this._window.on('minimize', this._mainWindowMinimizeHandler.bind(this));
         electron.ipcMain.on('quit', this._mainWindowQuitHandler.bind(this));
+        electron.ipcMain.on('import-log', function(event, message) {
+            console.log(message);
+        });
     }
 
     /**

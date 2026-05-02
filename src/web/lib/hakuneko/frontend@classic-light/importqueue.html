@@ -310,6 +310,8 @@
             ready() {
                 super.ready();
                 this._electron = require('electron');
+                // Get IPC renderer for logging to the terminal (main process)
+                this.ipc = require('electron').ipcRenderer;
                 // Check for saved/paused state on initialization
                 this._checkSavedState();
             }
@@ -338,34 +340,46 @@
                 return this._visible;
             }
 
+            // ---- Terminal Logging Helper ----
+
+            _log(message) {
+                try {
+                    this.ipc.send('import-log', message);
+                } catch(e) {
+                    console.log(message);
+                }
+            }
+
             // ---- Saved State (Persistence) ----
 
             _checkSavedState() {
-                console.log('[IMPORT] Checking for saved/paused queue state...');
+                let self = this;
+                self._log('[IMPORT] Checking for saved/paused queue state...');
                 Engine.Storage.loadConfig('importqueue')
-                    .then(data => {
+                    .then(function(data) {
                         if (data && data.urls && data.urls.length > 0) {
-                            console.log('[IMPORT] Found saved queue: ' + data.urls.length + ' URLs, ' + (data.lastProcessedIndex || 0) + ' already processed');
-                            this.set('_hasSavedState', true);
-                            this.set('_urls', data.urls);
-                            this.set('_processedIndex', data.lastProcessedIndex || 0);
-                            this.set('_concurrency', data.concurrency || 5);
-                            this.set('_batchDelay', data.batchDelay || 500);
-                            this.set('_progressPercent', Math.round((data.lastProcessedIndex / data.urls.length) * 100));
-                            this.set('_statusText', 'Paused queue found: ' + data.urls.length + ' URLs (' + (data.lastProcessedIndex || 0) + ' processed)');
-                            this.set('_isPaused', true);
+                            self.set('_hasSavedState', true);
+                            self.set('_urls', data.urls);
+                            self.set('_processedIndex', data.lastProcessedIndex || 0);
+                            self.set('_concurrency', data.concurrency || 5);
+                            self.set('_batchDelay', data.batchDelay || 500);
+                            self.set('_progressPercent', Math.round((data.lastProcessedIndex / data.urls.length) * 100));
+                            self.set('_statusText', 'Paused queue found: ' + data.urls.length + ' URLs (' + (data.lastProcessedIndex || 0) + ' processed)');
+                            self.set('_isPaused', true);
+                            self._log('[IMPORT] Found saved queue: ' + data.urls.length + ' URLs, ' + (data.lastProcessedIndex || 0) + ' already processed');
                         } else {
-                            console.log('[IMPORT] No saved queue state found');
+                            self._log('[IMPORT] No saved queue state found');
                         }
                     })
                     .catch(function() {
-                        console.log('[IMPORT] No saved queue state found (load failed)');
+                        // No saved state - that's fine
                     });
             }
 
             _saveState() {
-                console.log('[IMPORT] Saving queue state: ' + this._processedIndex + '/' + this._urls.length + ' URLs');
-                let urls = this._urls.map(function(u) {
+                let self = this;
+                self._log('[IMPORT] Saving queue state: ' + self._processedIndex + '/' + self._urls.length + ' URLs');
+                let urls = self._urls.map(function(u) {
                     return {
                         url: u.url,
                         status: u.status,
@@ -376,22 +390,22 @@
 
                 let state = {
                     urls: urls,
-                    concurrency: this._concurrency,
-                    batchDelay: this._batchDelay,
-                    lastProcessedIndex: this._processedIndex
+                    concurrency: self._concurrency,
+                    batchDelay: self._batchDelay,
+                    lastProcessedIndex: self._processedIndex
                 };
 
                 Engine.Storage.saveConfig('importqueue', state, 2)
                     .then(function() {
-                        console.log('[IMPORT] Queue state saved successfully');
+                        self._log('[IMPORT] Queue state saved successfully');
                     })
                     .catch(function(error) {
-                        console.warn('[IMPORT] Failed to save queue state:', error);
+                        self._log('[IMPORT] Failed to save queue state: ' + error.message);
                     });
             }
 
             _clearSavedState() {
-                console.log('[IMPORT] Clearing saved queue state');
+                this._log('[IMPORT] Clearing saved queue state');
                 let state = {
                     urls: [],
                     concurrency: 5,
@@ -442,7 +456,7 @@
             // ---- Public API (called from mangas.html) ----
 
             async openFilePicker() {
-                console.log('[IMPORT] Opening file picker dialog...');
+                this._log('[IMPORT] Opening file picker dialog...');
                 let self = this;
                 let result = await this._electron.remote.dialog.showOpenDialog({
                     title: 'Select URL Import File',
@@ -454,10 +468,10 @@
                 });
 
                 if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
-                    console.log('[IMPORT] File picker cancelled or no file selected');
+                    this._log('[IMPORT] File picker cancelled or no file selected');
                     return;
                 }
-                console.log('[IMPORT] User selected file: ' + result.filePaths[0]);
+                this._log('[IMPORT] User selected file: ' + result.filePaths[0]);
 
                 // Show the panel immediately with a loading message
                 this.set('_visible', true);
@@ -468,10 +482,10 @@
                 // Use setTimeout to let the UI update before doing heavy work
                 await new Promise(function(resolve) { setTimeout(resolve, 50); });
 
-                console.log('[IMPORT] Reading file from disk...');
+                this._log('[IMPORT] Reading file from disk...');
                 let fs = require('fs');
                 let content = fs.readFileSync(result.filePaths[0], 'utf8');
-                console.log('[IMPORT] File read: ' + content.length + ' bytes');
+                this._log('[IMPORT] File read: ' + content.length + ' bytes');
 
                 this.set('_statusText', 'Parsing URLs...');
                 await new Promise(function(resolve) { setTimeout(resolve, 50); });
@@ -479,10 +493,10 @@
                 let lines = content.split(/\r?\n/).filter(function(line) {
                     return line.trim().length > 0;
                 });
-                console.log('[IMPORT] Found ' + lines.length + ' URLs in file');
+                this._log('[IMPORT] Found ' + lines.length + ' URLs in file');
 
                 if (lines.length === 0) {
-                    console.log('[IMPORT] No URLs found in file, aborting');
+                    this._log('[IMPORT] No URLs found in file, aborting');
                     alert('The selected file contains no URLs.');
                     this.set('_urls', []);
                     this.set('_statusText', 'Ready');
@@ -490,7 +504,7 @@
                 }
 
                 // Reset state with new URLs
-                console.log('[IMPORT] Creating ' + lines.length + ' URL objects...');
+                this._log('[IMPORT] Creating ' + lines.length + ' URL objects...');
                 this.set('_statusText', 'Creating URL objects (' + lines.length + ')...');
 
                 // Build URL objects in chunks to avoid blocking the UI
@@ -508,11 +522,11 @@
                     }
                     // Yield to the event loop every 5000 items to keep UI responsive
                     if (i % 5000 === 0 && i > 0) {
-                        console.log('[IMPORT] Yield to event loop at ' + urlObjects.length + ' objects...');
+                        this._log('[IMPORT] Yield to event loop at ' + urlObjects.length + ' objects...');
                         await new Promise(function(resolve) { setTimeout(resolve, 10); });
                     }
                 }
-                console.log('[IMPORT] URL objects created: ' + urlObjects.length);
+                this._log('[IMPORT] URL objects created: ' + urlObjects.length);
 
                 this.set('_urls', urlObjects);
                 this.set('_processedIndex', 0);
@@ -522,7 +536,7 @@
                 this.set('_isPaused', false);
                 this.set('_hasSavedState', false);
                 this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click Start to begin.');
-                console.log('[IMPORT] Ready! ' + lines.length + ' URLs loaded, waiting for Start');
+                this._log('[IMPORT] Ready! ' + lines.length + ' URLs loaded, waiting for Start');
 
                 // Remove any saved state since we're starting fresh
                 this._clearSavedState();
@@ -531,27 +545,27 @@
             // ---- Queue Controls ----
 
             _onCloseClick() {
-                console.log('[IMPORT] Close button clicked');
+                this._log('[IMPORT] Close button clicked');
                 if (this._isRunning) {
-                    console.log('[IMPORT] Queue is running, prompting pause before close');
+                    this._log('[IMPORT] Queue is running, prompting pause before close');
                     if (!confirm('Import is in progress. Pause and close?')) {
-                        console.log('[IMPORT] User cancelled close');
+                        this._log('[IMPORT] User cancelled close');
                         return;
                     }
                     this._pauseQueue();
                 }
                 this.set('_visible', false);
                 this.set('_expandedUrl', null);
-                console.log('[IMPORT] Queue panel hidden');
+                this._log('[IMPORT] Queue panel hidden');
             }
 
             async _onStartClick() {
-                console.log('[IMPORT] ▶ Start button clicked');
+                this._log('[IMPORT] ▶ Start button clicked');
                 if (this._isRunning || this._processing) {
-                    console.log('[IMPORT] Already running or processing, ignoring Start');
+                    this._log('[IMPORT] Already running or processing, ignoring Start');
                     return;
                 }
-                console.log('[IMPORT] Starting queue with concurrency=' + this._concurrency + ', delay=' + this._batchDelay + 'ms');
+                this._log('[IMPORT] Starting queue with concurrency=' + this._concurrency + ', delay=' + this._batchDelay + 'ms');
                 this.set('_isRunning', true);
                 this.set('_isPaused', false);
                 this.set('_hasSavedState', false);
@@ -560,16 +574,16 @@
             }
 
             _onPauseClick() {
-                console.log('[IMPORT] ⏸ Pause button clicked');
+                this._log('[IMPORT] ⏸ Pause button clicked');
                 if (!this._isRunning) {
-                    console.log('[IMPORT] Queue not running, ignoring Pause');
+                    this._log('[IMPORT] Queue not running, ignoring Pause');
                     return;
                 }
                 this._pauseQueue();
             }
 
             _pauseQueue() {
-                console.log('[IMPORT] ⏸ Pausing queue at ' + this._processedIndex + '/' + this._urls.length + ' URLs');
+                this._log('[IMPORT] ⏸ Pausing queue at ' + this._processedIndex + '/' + this._urls.length + ' URLs');
                 this.set('_isRunning', false);
                 this.set('_isPaused', true);
                 this.set('_statusText', 'Paused at ' + this._processedIndex + '/' + this._urls.length + ' URLs');
@@ -577,12 +591,12 @@
             }
 
             async _onResumeClick() {
-                console.log('[IMPORT] ⟳ Resume button clicked');
+                this._log('[IMPORT] ⟳ Resume button clicked');
                 if (this._isRunning || this._processing) {
-                    console.log('[IMPORT] Already running or processing, ignoring Resume');
+                    this._log('[IMPORT] Already running or processing, ignoring Resume');
                     return;
                 }
-                console.log('[IMPORT] Resuming queue from ' + this._processedIndex + '/' + this._urls.length);
+                this._log('[IMPORT] Resuming queue from ' + this._processedIndex + '/' + this._urls.length);
                 this.set('_isRunning', true);
                 this.set('_isPaused', false);
                 this.set('_hasSavedState', false);
@@ -591,15 +605,15 @@
             }
 
             _onResetClick() {
-                console.log('[IMPORT] 🔄 Reset button clicked');
+                this._log('[IMPORT] 🔄 Reset button clicked');
                 if (this._isRunning) {
-                    console.log('[IMPORT] Queue is running, prompting confirmation');
+                    this._log('[IMPORT] Queue is running, prompting confirmation');
                     if (!confirm('Reset will stop the current import. Are you sure?')) {
-                        console.log('[IMPORT] User cancelled Reset');
+                        this._log('[IMPORT] User cancelled Reset');
                         return;
                     }
                 }
-                console.log('[IMPORT] Resetting queue (clearing ' + this._urls.length + ' URLs)');
+                this._log('[IMPORT] Resetting queue (clearing ' + this._urls.length + ' URLs)');
                 this.set('_urls', []);
                 this.set('_processedIndex', 0);
                 this.set('_resolvedMangas', []);
@@ -616,10 +630,10 @@
 
             async _processQueue() {
                 if (this._processing) {
-                    console.log('[IMPORT] Already processing, ignoring _processQueue call');
+                    this._log('[IMPORT] Already processing, ignoring _processQueue call');
                     return;
                 }
-                console.log('[IMPORT] ▶ Queue processing started');
+                this._log('[IMPORT] ▶ Queue processing started');
                 this._processing = true;
 
                 let urls = this._urls;
@@ -648,7 +662,7 @@
                                 }
                             }
                             if (allDone) {
-                                console.log('[IMPORT] All URLs processed, exiting loop');
+                                this._log('[IMPORT] All URLs processed, exiting loop');
                                 break;
                             }
                             // Otherwise advance processed index
@@ -657,7 +671,7 @@
                         }
 
                         batchCount++;
-                        console.log('[IMPORT] Batch ' + batchCount + ': processing URLs ' + batch[0].index + '-' + batch[batch.length-1].index + ' (' + batch.length + ' URLs)');
+                        this._log('[IMPORT] Batch ' + batchCount + ': processing URLs ' + batch[0].index + '-' + batch[batch.length-1].index + ' (' + batch.length + ' URLs)');
 
                         // Mark batch as resolving
                         batch.forEach(function(item) {
@@ -671,7 +685,7 @@
                         });
                         await Promise.all(promises);
                         let elapsed = Date.now() - startTime;
-                        console.log('[IMPORT] Batch ' + batchCount + ' completed in ' + elapsed + 'ms');
+                        this._log('[IMPORT] Batch ' + batchCount + ' completed in ' + elapsed + 'ms');
 
                         // Update progress
                         let processed = 0;
@@ -684,17 +698,17 @@
                         this.set('_progressPercent', percent);
                         this.set('_statusText', 'Processed ' + processed + '/' + urls.length + ' URLs (' + percent + '%)');
                         this.set('_processedIndex', this._processedIndex + batch.length);
-                        console.log('[IMPORT] Progress: ' + processed + '/' + urls.length + ' URLs (' + percent + '%) - ' + (urls.length - processed) + ' remaining');
+                        this._log('[IMPORT] Progress: ' + processed + '/' + urls.length + ' URLs (' + percent + '%) - ' + (urls.length - processed) + ' remaining');
 
                         // Delay between batches
                         if (delay > 0 && this._isRunning && processed < urls.length) {
-                            console.log('[IMPORT] Waiting ' + delay + 'ms before next batch...');
+                            this._log('[IMPORT] Waiting ' + delay + 'ms before next batch...');
                             await new Promise(function(resolve) { setTimeout(resolve, delay); });
                         }
                     }
 
                     if (this._isRunning) {
-                        console.log('[IMPORT] ✓ All URL resolution complete! Fetching chapters...');
+                        this._log('[IMPORT] ✓ All URL resolution complete! Fetching chapters...');
                         // Queue completed - now fetch chapters for all resolved mangas
                         await this._fetchAndDownloadChapters();
 
@@ -706,25 +720,25 @@
                             if (urls[i].status === 'failed') failed++;
                             if (urls[i].status === 'resolved') resolved++;
                         }
-                        console.log('[IMPORT] ✓ Queue fully complete! ' + resolved + ' resolved, ' + failed + ' failed, ' + batchCount + ' batches');
+                        this._log('[IMPORT] ✓ Queue fully complete! ' + resolved + ' resolved, ' + failed + ' failed, ' + batchCount + ' batches');
                         this.set('_statusText', 'Complete! ' + resolved + ' resolved, ' + failed + ' failed');
                         this.set('_progressPercent', 100);
                         this._clearSavedState();
                     } else {
-                        console.log('[IMPORT] Queue stopped (paused or cancelled) before all URLs processed');
+                        this._log('[IMPORT] Queue stopped (paused or cancelled) before all URLs processed');
                     }
                 } catch (error) {
-                    console.error('[IMPORT] Queue processing error:', error);
+                    this._log('[IMPORT] Queue processing error: ' + error.message);
                     this.set('_statusText', 'Error: ' + error.message);
                     this.set('_isRunning', false);
                 } finally {
                     this._processing = false;
-                    console.log('[IMPORT] Queue processor finished');
+                    this._log('[IMPORT] Queue processor finished');
                 }
             }
 
             async _resolveUrl(index, url) {
-                console.log('[IMPORT] Resolving URL ' + index + ': ' + url);
+                this._log('[IMPORT] Resolving URL ' + index + ': ' + url);
                 try {
                     let uri = new URL(url);
                     let connectors = Engine.Connectors.filter(function(connector) {
@@ -748,14 +762,14 @@
                         throw new Error('Too many matching connectors found for URL ' + uri.href);
                     }
 
-                    console.log('[IMPORT] Found connector: ' + connectors[0].id + ' for URL: ' + url);
+                    this._log('[IMPORT] Found connector: ' + connectors[0].id + ' for URL: ' + url);
                     let manga = await connectors[0].getMangaFromURI(uri);
-                    console.log('[IMPORT] ✓ Resolved: ' + url + ' → ' + manga.title);
+                    this._log('[IMPORT] ✓ Resolved: ' + url + ' → ' + manga.title);
                     this.notifyPath('_urls.' + index + '.manga', manga);
                     this.notifyPath('_urls.' + index + '.status', 'resolved');
                     this.push('_resolvedMangas', manga);
                 } catch (error) {
-                    console.warn('[IMPORT] ✗ Failed: ' + url + ' → ' + error.message);
+                    this._log('[IMPORT] ✗ Failed: ' + url + ' → ' + error.message);
                     this.notifyPath('_urls.' + index + '.status', 'failed');
                     this.notifyPath('_urls.' + index + '.error', error.message);
                 }
@@ -764,7 +778,7 @@
             async _fetchAndDownloadChapters() {
                 let mangas = this._resolvedMangas;
                 if (!mangas || mangas.length === 0) {
-                    console.log('[IMPORT] No resolved mangas to fetch chapters from');
+                    this._log('[IMPORT] No resolved mangas to fetch chapters from');
                     return;
                 }
 
@@ -778,13 +792,13 @@
                         uniqueMangas.push(manga);
                     }
                 }
-                console.log('[IMPORT] Fetching chapters for ' + uniqueMangas.length + ' unique manga (from ' + mangas.length + ' total resolves)');
+                this._log('[IMPORT] Fetching chapters for ' + uniqueMangas.length + ' unique manga (from ' + mangas.length + ' total resolves)');
 
                 this.set('_statusText', 'Fetching chapters for ' + uniqueMangas.length + ' unique manga...');
 
                 for (let i = 0; i < uniqueMangas.length; i++) {
                     let manga = uniqueMangas[i];
-                    console.log('[IMPORT] Fetching chapters: ' + manga.title + ' (' + (i + 1) + '/' + uniqueMangas.length + ')');
+                    this._log('[IMPORT] Fetching chapters: ' + manga.title + ' (' + (i + 1) + '/' + uniqueMangas.length + ')');
                     this.set('_statusText', 'Fetching chapters: ' + manga.title + ' (' + (i + 1) + '/' + uniqueMangas.length + ')');
 
                     try {
@@ -795,18 +809,18 @@
                             });
                         });
 
-                        console.log('[IMPORT]   └─ Got ' + (chapters ? chapters.length : 0) + ' chapters for ' + manga.title);
+                        this._log('[IMPORT]   └─ Got ' + (chapters ? chapters.length : 0) + ' chapters for ' + manga.title);
                         if (chapters && chapters.length > 0) {
                             for (let c = 0; c < chapters.length; c++) {
                                 Engine.DownloadManager.addDownload(chapters[c]);
                             }
                         }
                     } catch (error) {
-                        console.warn('[IMPORT]   └─ Failed to get chapters for ' + manga.title + ':', error.message);
+                        this._log('[IMPORT]   └─ Failed to get chapters for ' + manga.title + ':', error.message);
                     }
                 }
 
-                console.log('[IMPORT] All chapters fetched and added to download queue');
+                this._log('[IMPORT] All chapters fetched and added to download queue');
                 this.set('_statusText', 'All chapters added to download queue.');
             }
         }
