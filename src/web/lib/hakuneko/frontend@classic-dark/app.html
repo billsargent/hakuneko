@@ -5,6 +5,7 @@
 <link rel="import" href="chapters.html">
 <link rel="import" href="pages.html">
 <link rel="import" href="jobs.html">
+<link rel="import" href="importqueue.html">
 <link rel="import" href="quotes.html">
 <link rel="import" href="start.html">
 
@@ -127,6 +128,7 @@
                 <hakuneko-mangas style$="[[ getMangaListStyle(readerEnabled) ]]" selected-connector="{{ connector }}" selected-manga="{{ manga }}"></hakuneko-mangas>
                 <hakuneko-chapters style$="[[ getMangaListStyle(readerEnabled) ]]" selected-connector="[[ connector ]]" selected-manga="[[ manga ]]" selected-chapter="{{ chapter }}"></hakuneko-chapters>
             </div>
+            <hakuneko-import-queue></hakuneko-import-queue>
             <hakuneko-jobs></hakuneko-jobs>
         </div>
         <div style$="[[ getContentPanelStyle(readerEnabled) ]]" class="content">

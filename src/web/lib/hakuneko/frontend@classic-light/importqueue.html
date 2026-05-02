@@ -1,0 +1,718 @@
+<link rel="import" href="../../polymer/polymer-element.html">
+<link rel="import" href="../../polymer/lib/elements/dom-repeat.html">
+<link rel="import" href="../../polymer/lib/elements/dom-if.html">
+<link rel="import" href="theme.html">
+
+<dom-module id="hakuneko-import-queue">
+
+    <template>
+        <style include="theme"></style>
+        <style>
+            :host {
+                display: block;
+                background-color: var(--job-control-background-color);
+                border-top: var(--manga-control-separator);
+                border-bottom: var(--manga-control-separator);
+            }
+            .header {
+                display: flex;
+                flex-direction: row;
+                padding: 0.25em;
+                font-weight: bold;
+            }
+            .header-title {
+                flex: 1;
+                padding: 0.25em;
+            }
+            .header-close {
+                flex: 0;
+                cursor: pointer;
+                padding: 0.25em;
+            }
+            .header-close:hover {
+                opacity: 0.7;
+            }
+            .progress-bar {
+                height: 0.5em;
+                background-color: var(--job-list-progress-background-color);
+                margin: 0.25em;
+                border-radius: 0.25em;
+            }
+            .progress-fill {
+                height: 100%;
+                background-color: var(--job-list-progress-color);
+                transition: width 0.3s ease;
+                border-radius: 0.25em;
+            }
+            .controls {
+                display: flex;
+                flex-direction: row;
+                padding: 0.25em;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 0.5em;
+            }
+            .controls .button {
+                cursor: pointer;
+                padding: 0.2em 0.5em;
+                font-size: 0.9em;
+            }
+            .controls label {
+                font-size: 0.8em;
+                display: flex;
+                align-items: center;
+                gap: 0.25em;
+            }
+            .controls select {
+                font-size: 0.85em;
+                padding: 0.1em;
+            }
+            .status-text {
+                flex: 1;
+                font-size: 0.85em;
+                padding: 0.25em;
+                text-align: left;
+            }
+            .url-list {
+                max-height: 12em;
+                overflow-y: auto;
+                background-color: var(--job-list-background-color);
+                font-size: 0.8em;
+            }
+            .url-item {
+                display: flex;
+                flex-direction: row;
+                padding: 0.15em 0.25em;
+                border-bottom: var(--job-list-row-border);
+                cursor: default;
+            }
+            .url-item:hover {
+                background-color: var(--manga-list-highlighted);
+            }
+            .url-item-failed {
+                cursor: pointer;
+            }
+            .url-status-icon {
+                flex: 0;
+                width: 1.5em;
+                text-align: center;
+            }
+            .url-text {
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                padding-left: 0.25em;
+            }
+            .url-status-text {
+                flex: 0;
+                width: 5em;
+                text-align: right;
+                font-size: 0.9em;
+            }
+            .url-error {
+                background-color: var(--manga-list-notification-color);
+                padding: 0.5em;
+                font-size: 0.9em;
+                border-bottom: var(--job-list-row-border);
+                white-space: pre-wrap;
+                word-break: break-all;
+                line-height: 1.4;
+            }
+            .status-pending,
+            .status-pending-text {
+                color: var(--job-list-button-queued-color);
+            }
+            .status-resolving,
+            .status-resolving-text {
+                color: var(--job-list-button-downloading-color);
+            }
+            .status-resolved,
+            .status-resolved-text {
+                color: var(--job-list-button-completed-color);
+            }
+            .status-failed,
+            .status-failed-text {
+                color: var(--job-list-button-failed-color);
+            }
+            .button-disabled {
+                opacity: 0.5;
+                cursor: not-allowed !important;
+            }
+            .empty-message {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 1.5em;
+                opacity: 0.6;
+                font-size: 0.9em;
+            }
+            .hide {
+                display: none;
+            }
+        </style>
+
+        <div class$="[[ _getVisibilityClass(_visible) ]]">
+
+            <div class="header">
+                <span class="header-title">Import Queue Manager</span>
+                <span class="header-close" on-click="_onCloseClick" title="Close import queue">✕</span>
+            </div>
+
+            <div class="progress-bar">
+                <div class="progress-fill" style$="width: [[ _progressPercent ]]%"></div>
+            </div>
+
+            <div class="controls">
+                <span class="status-text">[[ _statusText ]]</span>
+
+                <template is="dom-if" if="[[ _showStartButton ]]">
+                    <button class="button" on-click="_onStartClick">▶ Start</button>
+                </template>
+
+                <template is="dom-if" if="[[ _isRunning ]]">
+                    <button class="button" on-click="_onPauseClick">⏸ Pause</button>
+                </template>
+
+                <template is="dom-if" if="[[ _showResumeButton ]]">
+                    <button class="button" on-click="_onResumeClick">⟳ Resume</button>
+                </template>
+
+                <button class="button" on-click="_onResetClick" disabled$="[[ _processing ]]">🔄 Reset</button>
+
+                <label>Concurrency:
+                    <select value="{{ _concurrency::change }}">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="5" selected>5</option>
+                        <option value="10">10</option>
+                        <option value="15">15</option>
+                        <option value="20">20</option>
+                    </select>
+                </label>
+
+                <label>Delay:
+                    <select value="{{ _batchDelay::change }}">
+                        <option value="0">0ms</option>
+                        <option value="250">250ms</option>
+                        <option value="500" selected>500ms</option>
+                        <option value="1000">1s</option>
+                        <option value="2000">2s</option>
+                        <option value="5000">5s</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="url-list">
+                <template is="dom-repeat" items="[[ _urls ]]" initial-count="500" target-framerate="5">
+                    <div>
+                        <div class$="url-item [[ _getUrlItemClass(item.status) ]]" on-click="_onUrlClick">
+                            <span class="url-status-icon">
+                                <i class$="fas [[ _getUrlStatusIcon(item.status) ]] [[ _getUrlStatusClass(item.status) ]]"></i>
+                            </span>
+                            <span class="url-text" title$="[[ item.url ]]">[[ item.url ]]</span>
+                            <span class="url-status-text [[ _getUrlStatusClass(item.status) ]]">[[ item.status ]]</span>
+                        </div>
+                        <div class$="url-error [[ _getErrorVisibility(item, _expandedUrl) ]]">
+                            <strong>Error Details:</strong><br>
+                            [[ item.error ]]
+                        </div>
+                    </div>
+                </template>
+                <template is="dom-if" if="[[ _showEmptyMessage ]]">
+                    <div class="empty-message">
+                        No URLs loaded. Click "Import URLs" in the toolbar above to load a text file.
+                    </div>
+                </template>
+            </div>
+
+        </div>
+    </template>
+
+    <script>
+        /** @polymerElement */
+        class HakunekoImportQueue extends Polymer.Element {
+
+            static get is() {
+                return 'hakuneko-import-queue';
+            }
+
+            static get properties() {
+                return {
+                    _visible: {
+                        type: Boolean,
+                        value: false
+                    },
+                    _urls: {
+                        type: Array,
+                        value: function() { return []; }
+                    },
+                    _isRunning: {
+                        type: Boolean,
+                        value: false
+                    },
+                    _isPaused: {
+                        type: Boolean,
+                        value: false
+                    },
+                    _hasSavedState: {
+                        type: Boolean,
+                        value: false
+                    },
+                    _concurrency: {
+                        type: Number,
+                        value: 5
+                    },
+                    _batchDelay: {
+                        type: Number,
+                        value: 500
+                    },
+                    _progressPercent: {
+                        type: Number,
+                        value: 0
+                    },
+                    _statusText: {
+                        type: String,
+                        value: 'Ready'
+                    },
+                    _expandedUrl: {
+                        type: String,
+                        value: null
+                    },
+                    _processedIndex: {
+                        type: Number,
+                        value: 0
+                    },
+                    _resolvedMangas: {
+                        type: Array,
+                        value: function() { return []; }
+                    },
+                    _processing: {
+                        type: Boolean,
+                        value: false
+                    },
+                    _showStartButton: {
+                        type: Boolean,
+                        computed: '_computeShowStartButton(_isRunning, _hasSavedState, _urls.length, _processing)'
+                    },
+                    _showResumeButton: {
+                        type: Boolean,
+                        computed: '_computeShowResumeButton(_hasSavedState, _isRunning, _processing)'
+                    },
+                    _showEmptyMessage: {
+                        type: Boolean,
+                        computed: '_computeEmptyMessage(_urls.length, _visible)'
+                    }
+                };
+            }
+
+            ready() {
+                super.ready();
+                this._electron = require('electron');
+                // Check for saved/paused state on initialization
+                this._checkSavedState();
+            }
+
+            // ---- Computed Properties ----
+
+            _computeShowStartButton(isRunning, hasSavedState, urlCount, processing) {
+                return !isRunning && !hasSavedState && urlCount > 0 && !processing;
+            }
+
+            _computeShowResumeButton(hasSavedState, isRunning, processing) {
+                return hasSavedState && !isRunning && !processing;
+            }
+
+            _computeEmptyMessage(urlCount, visible) {
+                return visible && urlCount === 0;
+            }
+
+            // ---- Visibility ----
+
+            _getVisibilityClass(visible) {
+                return visible ? '' : 'hide';
+            }
+
+            get visible() {
+                return this._visible;
+            }
+
+            // ---- Saved State (Persistence) ----
+
+            _checkSavedState() {
+                Engine.Storage.loadConfig('importqueue')
+                    .then(data => {
+                        if (data && data.urls && data.urls.length > 0) {
+                            this.set('_hasSavedState', true);
+                            this.set('_urls', data.urls);
+                            this.set('_processedIndex', data.lastProcessedIndex || 0);
+                            this.set('_concurrency', data.concurrency || 5);
+                            this.set('_batchDelay', data.batchDelay || 500);
+                            this.set('_progressPercent', Math.round((data.lastProcessedIndex / data.urls.length) * 100));
+                            this.set('_statusText', 'Paused queue found: ' + data.urls.length + ' URLs (' + (data.lastProcessedIndex || 0) + ' processed)');
+                            this.set('_isPaused', true);
+                        }
+                    })
+                    .catch(function() {
+                        // No saved state - that's fine
+                    });
+            }
+
+            _saveState() {
+                let urls = this._urls.map(function(u) {
+                    return {
+                        url: u.url,
+                        status: u.status,
+                        manga: null, // Don't serialize manga objects
+                        error: u.error
+                    };
+                });
+
+                let state = {
+                    urls: urls,
+                    concurrency: this._concurrency,
+                    batchDelay: this._batchDelay,
+                    lastProcessedIndex: this._processedIndex
+                };
+
+                Engine.Storage.saveConfig('importqueue', state, 2)
+                    .then(function() {
+                        console.log('Import queue state saved');
+                    })
+                    .catch(function(error) {
+                        console.warn('Failed to save import queue state:', error);
+                    });
+            }
+
+            _clearSavedState() {
+                let state = {
+                    urls: [],
+                    concurrency: 5,
+                    batchDelay: 500,
+                    lastProcessedIndex: 0
+                };
+                Engine.Storage.saveConfig('importqueue', state, 2).catch(function() {});
+            }
+
+            // ---- UI Helpers ----
+
+            _getUrlStatusIcon(status) {
+                switch(status) {
+                    case 'pending':  return 'fa-clock';
+                    case 'resolving': return 'fa-spinner fa-pulse';
+                    case 'resolved':  return 'fa-check';
+                    case 'failed':    return 'fa-exclamation-triangle';
+                    default:          return 'fa-circle';
+                }
+            }
+
+            _getUrlStatusClass(status) {
+                switch(status) {
+                    case 'pending':   return 'status-pending';
+                    case 'resolving': return 'status-resolving';
+                    case 'resolved':  return 'status-resolved';
+                    case 'failed':    return 'status-failed';
+                    default:          return '';
+                }
+            }
+
+            _getUrlItemClass(status) {
+                return status === 'failed' ? 'url-item url-item-failed' : 'url-item';
+            }
+
+            _getErrorVisibility(item, expandedUrl) {
+                return (item.status === 'failed' && item.error && item.url === expandedUrl) ? '' : 'hide';
+            }
+
+            _onUrlClick(e) {
+                let item = e.model.item;
+                if (item.status === 'failed') {
+                    let url = this._expandedUrl === item.url ? null : item.url;
+                    this.set('_expandedUrl', url);
+                }
+            }
+
+            // ---- Public API (called from mangas.html) ----
+
+            async openFilePicker() {
+                let self = this;
+                let result = await this._electron.remote.dialog.showOpenDialog({
+                    title: 'Select URL Import File',
+                    properties: ['openFile'],
+                    filters: [
+                        { name: 'Text Files', extensions: ['txt', 'csv', 'urls'] },
+                        { name: 'All Files', extensions: ['*'] }
+                    ]
+                });
+
+                if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+                    return;
+                }
+
+                let fs = require('fs');
+                let content = fs.readFileSync(result.filePaths[0], 'utf8');
+                let lines = content.split(/\r?\n/).filter(function(line) {
+                    return line.trim().length > 0;
+                });
+
+                if (lines.length === 0) {
+                    alert('The selected file contains no URLs.');
+                    return;
+                }
+
+                // Reset state with new URLs
+                let urlObjects = lines.map(function(url) {
+                    return {
+                        url: url.trim(),
+                        status: 'pending',
+                        manga: null,
+                        error: null
+                    };
+                });
+
+                this.set('_urls', urlObjects);
+                this.set('_processedIndex', 0);
+                this.set('_resolvedMangas', []);
+                this.set('_progressPercent', 0);
+                this.set('_isRunning', false);
+                this.set('_isPaused', false);
+                this.set('_hasSavedState', false);
+                this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click Start to begin.');
+                this.set('_visible', true);
+                this.set('_expandedUrl', null);
+
+                // Remove any saved state since we're starting fresh
+                this._clearSavedState();
+            }
+
+            // ---- Queue Controls ----
+
+            _onCloseClick() {
+                if (this._isRunning) {
+                    if (!confirm('Import is in progress. Pause and close?')) {
+                        return;
+                    }
+                    this._pauseQueue();
+                }
+                this.set('_visible', false);
+                this.set('_expandedUrl', null);
+            }
+
+            async _onStartClick() {
+                if (this._isRunning || this._processing) return;
+                this.set('_isRunning', true);
+                this.set('_isPaused', false);
+                this.set('_hasSavedState', false);
+                this.set('_expandedUrl', null);
+                this._processQueue();
+            }
+
+            _onPauseClick() {
+                if (!this._isRunning) return;
+                this._pauseQueue();
+            }
+
+            _pauseQueue() {
+                this.set('_isRunning', false);
+                this.set('_isPaused', true);
+                this.set('_statusText', 'Paused at ' + this._processedIndex + '/' + this._urls.length + ' URLs');
+                this._saveState();
+            }
+
+            async _onResumeClick() {
+                if (this._isRunning || this._processing) return;
+                this.set('_isRunning', true);
+                this.set('_isPaused', false);
+                this.set('_hasSavedState', false);
+                this.set('_expandedUrl', null);
+                this._processQueue();
+            }
+
+            _onResetClick() {
+                if (this._isRunning) {
+                    if (!confirm('Reset will stop the current import. Are you sure?')) return;
+                }
+                this.set('_urls', []);
+                this.set('_processedIndex', 0);
+                this.set('_resolvedMangas', []);
+                this.set('_progressPercent', 0);
+                this.set('_isRunning', false);
+                this.set('_isPaused', false);
+                this.set('_hasSavedState', false);
+                this.set('_statusText', 'Ready');
+                this.set('_expandedUrl', null);
+                this._clearSavedState();
+            }
+
+            // ---- Core Queue Processing ----
+
+            async _processQueue() {
+                if (this._processing) return;
+                this._processing = true;
+
+                let urls = this._urls;
+                let concurrency = this._concurrency;
+                let delay = this._batchDelay;
+                let self = this;
+
+                try {
+                    while (this._isRunning && this._processedIndex < urls.length) {
+                        // Collect the next batch of pending URLs (up to concurrency)
+                        let batch = [];
+                        for (let i = this._processedIndex; i < urls.length && batch.length < concurrency; i++) {
+                            if (urls[i].status === 'pending') {
+                                batch.push({ index: i, urlObj: urls[i] });
+                            }
+                        }
+
+                        if (batch.length === 0) {
+                            // No pending URLs found - check if all done
+                            let allDone = true;
+                            for (let i = 0; i < urls.length; i++) {
+                                if (urls[i].status === 'pending') {
+                                    allDone = false;
+                                    break;
+                                }
+                            }
+                            if (allDone) break;
+                            // Otherwise advance processed index
+                            this._processedIndex++;
+                            continue;
+                        }
+
+                        // Mark batch as resolving
+                        batch.forEach(function(item) {
+                            self.notifyPath('_urls.' + item.index + '.status', 'resolving');
+                        });
+
+                        // Process batch concurrently
+                        let promises = batch.map(function(item) {
+                            return self._resolveUrl(item.index, item.urlObj.url);
+                        });
+                        await Promise.all(promises);
+
+                        // Update progress
+                        let processed = 0;
+                        for (let i = 0; i < urls.length; i++) {
+                            if (urls[i].status === 'resolved' || urls[i].status === 'failed') {
+                                processed++;
+                            }
+                        }
+                        let percent = Math.round((processed / urls.length) * 100);
+                        this.set('_progressPercent', percent);
+                        this.set('_statusText', 'Processed ' + processed + '/' + urls.length + ' URLs (' + percent + '%)');
+                        this.set('_processedIndex', this._processedIndex + batch.length);
+
+                        // Delay between batches
+                        if (delay > 0 && this._isRunning && processed < urls.length) {
+                            await new Promise(function(resolve) { setTimeout(resolve, delay); });
+                        }
+                    }
+
+                    if (this._isRunning) {
+                        // Queue completed - now fetch chapters for all resolved mangas
+                        await this._fetchAndDownloadChapters();
+
+                        this.set('_isRunning', false);
+                        this.set('_isPaused', false);
+                        let failed = 0;
+                        let resolved = 0;
+                        for (let i = 0; i < urls.length; i++) {
+                            if (urls[i].status === 'failed') failed++;
+                            if (urls[i].status === 'resolved') resolved++;
+                        }
+                        this.set('_statusText', 'Complete! ' + resolved + ' resolved, ' + failed + ' failed');
+                        this.set('_progressPercent', 100);
+                        this._clearSavedState();
+                    }
+                } catch (error) {
+                    console.error('Import queue error:', error);
+                    this.set('_statusText', 'Error: ' + error.message);
+                    this.set('_isRunning', false);
+                } finally {
+                    this._processing = false;
+                }
+            }
+
+            async _resolveUrl(index, url) {
+                try {
+                    let uri = new URL(url);
+                    let connectors = Engine.Connectors.filter(function(connector) {
+                        return connector.canHandleURI && connector.canHandleURI(uri);
+                    });
+                    if (!connectors.length) {
+                        connectors = Engine.Connectors.filter(function(connector) {
+                            return connector.url && connector.url.includes(uri.hostname);
+                        });
+                    }
+                    if (connectors.length > 1) {
+                        let pathname = uri.pathname;
+                        connectors = connectors.filter(function(connector) {
+                            return pathname.startsWith(new URL(connector.url).pathname);
+                        });
+                    }
+                    if (!connectors.length) {
+                        throw new Error('No matching connector found for URL ' + uri.href);
+                    }
+                    if (connectors.length > 1) {
+                        throw new Error('Too many matching connectors found for URL ' + uri.href);
+                    }
+
+                    let manga = await connectors[0].getMangaFromURI(uri);
+                    this.notifyPath('_urls.' + index + '.manga', manga);
+                    this.notifyPath('_urls.' + index + '.status', 'resolved');
+                    this.push('_resolvedMangas', manga);
+                } catch (error) {
+                    console.warn('IMPORT:', url, error.message);
+                    this.notifyPath('_urls.' + index + '.status', 'failed');
+                    this.notifyPath('_urls.' + index + '.error', error.message);
+                }
+            }
+
+            async _fetchAndDownloadChapters() {
+                let mangas = this._resolvedMangas;
+                if (!mangas || mangas.length === 0) return;
+
+                // Deduplicate manga by their unique identifier
+                let uniqueMangas = [];
+                let seenIds = {};
+                for (let i = 0; i < mangas.length; i++) {
+                    let manga = mangas[i];
+                    if (!seenIds[manga.id]) {
+                        seenIds[manga.id] = true;
+                        uniqueMangas.push(manga);
+                    }
+                }
+
+                this.set('_statusText', 'Fetching chapters for ' + uniqueMangas.length + ' unique manga...');
+
+                for (let i = 0; i < uniqueMangas.length; i++) {
+                    let manga = uniqueMangas[i];
+                    this.set('_statusText', 'Fetching chapters: ' + manga.title + ' (' + (i + 1) + '/' + uniqueMangas.length + ')');
+
+                    try {
+                        let chapters = await new Promise(function(resolve, reject) {
+                            manga.getChapters(function(error, chapters) {
+                                if (error) reject(error);
+                                else resolve(chapters);
+                            });
+                        });
+
+                        if (chapters && chapters.length > 0) {
+                            for (let c = 0; c < chapters.length; c++) {
+                                Engine.DownloadManager.addDownload(chapters[c]);
+                            }
+                        }
+                    } catch (error) {
+                        console.warn('Failed to get chapters for ' + manga.title + ':', error.message);
+                    }
+                }
+
+                this.set('_statusText', 'All chapters added to download queue.');
+            }
+        }
+        window.customElements.define(HakunekoImportQueue.is, HakunekoImportQueue);
+    </script>
+
+</dom-module>

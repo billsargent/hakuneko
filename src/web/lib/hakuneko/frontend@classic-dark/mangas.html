@@ -123,6 +123,7 @@
         </table>
         <div class="toolbar separator" style="flex: 0; padding: 0.5em;">
             <button class="button" on-click="onDownloadAllClick" title="Download all chapters of all listed manga">Download All</button>
+            <button class="button" on-click="onImportUrlsClick" title="Import URLs from a text file to resolve and download">Import URLs</button>
         </div>
         <ul class="list" >
             <template is="dom-if" if="[[ existMangasForValidConnector(selectedConnector, mangaList.length) ]]">                        
@@ -342,6 +343,19 @@
                     this.set('selectedConnector', clipboardConnector);
                     this.onUpdateMangaListClick(evt);
                 }
+            }
+
+            /**
+             * Event listener for the Import URLs button.
+             */
+            async onImportUrlsClick(e) {
+                console.log('Import URLs clicked');
+                let importQueue = document.querySelector('hakuneko-import-queue');
+                if (!importQueue) {
+                    console.error('Import queue component not found!');
+                    return;
+                }
+                await importQueue.openFilePicker();
             }
 
             /**
