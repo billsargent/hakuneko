@@ -450,26 +450,53 @@
                     return;
                 }
 
+                // Show the panel immediately with a loading message
+                this.set('_visible', true);
+                this.set('_statusText', 'Reading file...');
+                this.set('_expandedUrl', null);
+                this.set('_urls', []);
+
+                // Use setTimeout to let the UI update before doing heavy work
+                await new Promise(function(resolve) { setTimeout(resolve, 50); });
+
                 let fs = require('fs');
                 let content = fs.readFileSync(result.filePaths[0], 'utf8');
+
+                this.set('_statusText', 'Parsing URLs...');
+                await new Promise(function(resolve) { setTimeout(resolve, 50); });
+
                 let lines = content.split(/\r?\n/).filter(function(line) {
                     return line.trim().length > 0;
                 });
 
                 if (lines.length === 0) {
                     alert('The selected file contains no URLs.');
+                    this.set('_urls', []);
+                    this.set('_statusText', 'Ready');
                     return;
                 }
 
                 // Reset state with new URLs
-                let urlObjects = lines.map(function(url) {
-                    return {
-                        url: url.trim(),
-                        status: 'pending',
-                        manga: null,
-                        error: null
-                    };
-                });
+                this.set('_statusText', 'Creating URL objects (' + lines.length + ')...');
+
+                // Build URL objects in chunks to avoid blocking the UI
+                let urlObjects = [];
+                const chunkSize = 500;
+                for (let i = 0; i < lines.length; i += chunkSize) {
+                    let chunk = lines.slice(i, i + chunkSize);
+                    for (let j = 0; j < chunk.length; j++) {
+                        urlObjects.push({
+                            url: chunk[j].trim(),
+                            status: 'pending',
+                            manga: null,
+                            error: null
+                        });
+                    }
+                    // Yield to the event loop every 500 items to keep UI responsive
+                    if (i % 5000 === 0 && i > 0) {
+                        await new Promise(function(resolve) { setTimeout(resolve, 10); });
+                    }
+                }
 
                 this.set('_urls', urlObjects);
                 this.set('_processedIndex', 0);
@@ -479,8 +506,6 @@
                 this.set('_isPaused', false);
                 this.set('_hasSavedState', false);
                 this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click Start to begin.');
-                this.set('_visible', true);
-                this.set('_expandedUrl', null);
 
                 // Remove any saved state since we're starting fresh
                 this._clearSavedState();
