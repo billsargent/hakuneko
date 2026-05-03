@@ -672,7 +672,7 @@
 
                         batchCount++;
                         self._log('[IMPORT] Batch ' + batchCount + ': ' + batch.length + ' URLs');
-                        batch.forEach(function(item) { self.notifyPath('_urls.' + item.index + '.status', 'resolving'); });
+                        batch.forEach(function(item) { self.set('_urls.' + item.index + '.status', 'resolving'); });
 
                         let promises = batch.map(function(item) { return self._resolveUrl(item.index, item.urlObj.url); });
                         await Promise.all(promises);
@@ -722,13 +722,13 @@
                     if (connectors.length > 1) throw new Error('Too many connectors for ' + uri.href);
 
                     let manga = await connectors[0].getMangaFromURI(uri);
-                    this.notifyPath('_urls.' + index + '.manga', manga);
-                    this.notifyPath('_urls.' + index + '.status', 'resolved');
+                    this.set('_urls.' + index + '.manga', manga);
+                    this.set('_urls.' + index + '.status', 'resolved');
                     this.push('_resolvedMangas', manga);
                 } catch (error) {
                     this._log('[IMPORT] ✗ ' + url + ' → ' + error.message);
-                    this.notifyPath('_urls.' + index + '.status', 'failed');
-                    this.notifyPath('_urls.' + index + '.error', error.message);
+                    this.set('_urls.' + index + '.status', 'failed');
+                    this.set('_urls.' + index + '.error', error.message);
                 }
             }
 
@@ -779,15 +779,8 @@
                             continue;
                         }
 
-                        // Store chapters in urlItem for display
-                        let chapterItems = chapters.map(function(ch) {
-                            return { title: ch.title, status: 'pending' };
-                        });
                         // Find the urlItem index in _urls to update
                         let urlIdx = this._urls.indexOf(urlItem);
-                        if (urlIdx >= 0) {
-                            this.notifyPath('_urls.' + urlIdx + '.chapters', chapterItems);
-                        }
 
                         // Download each chapter
                         let downloadStartIdx = (m === this._downloadMangaIndex) ? this._downloadChapterIndex : 0;
@@ -796,9 +789,15 @@
                             this._downloadChapterIndex = c;
                             this.set('_currentDownloadingChapter', chapter.title);
 
-                            // Update UI
+                            // Update UI - store chapter info and set status to downloading
                             if (urlIdx >= 0) {
-                                this.notifyPath('_urls.' + urlIdx + '.chapters.' + c + '.status', 'downloading');
+                                if (!this._urls[urlIdx].chapters) {
+                                    let chapterItems = chapters.map(function(ch) {
+                                        return { title: ch.title, status: 'pending' };
+                                    });
+                                    this.set('_urls.' + urlIdx + '.chapters', chapterItems);
+                                }
+                                this.set('_urls.' + urlIdx + '.chapters.' + c + '.status', 'downloading');
                             }
 
                             let pct = Math.round(((m * chapters.length + c) / (mangas.length * chapters.length)) * 100);
@@ -810,7 +809,7 @@
                             let success = await this._downloadChapter(chapter);
 
                             if (urlIdx >= 0) {
-                                this.notifyPath('_urls.' + urlIdx + '.chapters.' + c + '.status', success ? 'downloaded' : 'failed');
+                                this.set('_urls.' + urlIdx + '.chapters.' + c + '.status', success ? 'downloaded' : 'failed');
                             }
                             if (success) {
                                 this._log('[IMPORT]     ✓ ' + chapter.title + ' saved');
