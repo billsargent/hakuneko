@@ -390,19 +390,60 @@
                         self.set('_processedIndex', data.lastProcessedIndex || 0);
                         self.set('_downloadMangaIndex', data.downloadMangaIndex || 0);
                         self.set('_downloadChapterIndex', data.downloadChapterIndex || 0);
-                        self.set('_resolvedMangas', data.resolvedMangas || []);
+                        self.set('_resolvedMangas', []);
                         // Recalculate progress
                         if (data.phase === 'resolve-paused' || data.phase === 'idle') {
                             let pct = Math.round((data.lastProcessedIndex / data.urls.length) * 100) || 0;
                             self.set('_progressPercent', pct);
                             self.set('_statusText', 'Paused at ' + data.lastProcessedIndex + '/' + data.urls.length + ' URLs');
-                        } else if (data.phase === 'download-paused') {
-                            self.set('_progressPercent', data.downloadProgressPercent || 0);
-                            self.set('_statusText', 'Downloads paused: ' + (data.downloadChapterIndex || 0) + ' chapters done');
+                        } else if (data.phase === 'download-paused' || data.phase === 'resolve-done') {
+                            self.set('_progressPercent', data.downloadProgressPercent || 50);
+                            self.set('_statusText', 'Re-resolving manga objects...');
+                            // Re-resolve all resolved URLs to rebuild manga objects (lost during JSON serialization)
+                            self._reResolveResolvedMangas();
+                            return;
                         }
                         self.set('_visible', true);
                     })
                     .catch(function() {});
+            }
+
+            async _reResolveResolvedMangas() {
+                let self = this;
+                let urls = this._urls;
+                let resolvedUrls = [];
+                for (let i = 0; i < urls.length; i++) {
+                    if (urls[i].status === 'resolved' && !urls[i].manga) {
+                        resolvedUrls.push(i);
+                    }
+                }
+                if (resolvedUrls.length === 0) {
+                    this._log('[IMPORT] No URLs need re-resolving');
+                    this.set('_visible', true);
+                    return;
+                }
+                this._log('[IMPORT] Re-resolving ' + resolvedUrls.length + ' manga objects...');
+                this.set('_statusText', 'Re-resolving ' + resolvedUrls.length + ' manga (fast)...');
+                
+                // Use high concurrency (20) with no delay for fast re-resolve
+                let concurrency = Math.min(20, resolvedUrls.length);
+                for (let i = 0; i < resolvedUrls.length; i += concurrency) {
+                    let batch = resolvedUrls.slice(i, i + concurrency);
+                    let promises = batch.map(function(idx) {
+                        return self._resolveUrl(idx, urls[idx].url);
+                    });
+                    await Promise.all(promises);
+                    if (i % 100 === 0) {
+                        this.set('_statusText', 'Re-resolving: ' + Math.min(i + concurrency, resolvedUrls.length) + '/' + resolvedUrls.length);
+                    }
+                    // Tiny yield to keep UI responsive
+                    if (i % 500 === 0) {
+                        await new Promise(function(r) { setTimeout(r, 5); });
+                    }
+                }
+                this._log('[IMPORT] Re-resolve complete: ' + self._resolvedMangas.length + ' manga ready');
+                this.set('_statusText', 'Queue restored. ' + self._resolvedMangas.length + ' manga ready.');
+                this.set('_visible', true);
             }
 
             _saveState() {
