@@ -398,9 +398,9 @@
                             self.set('_statusText', 'Paused at ' + data.lastProcessedIndex + '/' + data.urls.length + ' URLs');
                         } else if (data.phase === 'download-paused' || data.phase === 'resolve-done') {
                             self.set('_progressPercent', data.downloadProgressPercent || 50);
-                            self.set('_statusText', 'Re-resolving manga objects...');
-                            // Re-resolve all resolved URLs to rebuild manga objects (lost during JSON serialization)
-                            self._reResolveResolvedMangas();
+                            self.set('_statusText', 'Restoring manga objects from saved state...');
+                            // Reconstruct manga objects from stored metadata (instant, no network)
+                            self._reconstructMangasFromMeta();
                             return;
                         }
                         self.set('_visible', true);
@@ -408,41 +408,44 @@
                     .catch(function() {});
             }
 
-            async _reResolveResolvedMangas() {
+            async _reconstructMangasFromMeta() {
                 let self = this;
                 let urls = this._urls;
-                let resolvedUrls = [];
-                for (let i = 0; i < urls.length; i++) {
-                    if (urls[i].status === 'resolved' && !urls[i].manga) {
-                        resolvedUrls.push(i);
-                    }
-                }
-                if (resolvedUrls.length === 0) {
-                    this._log('[IMPORT] No URLs need re-resolving');
+                let count = 0;
+                this._log('[IMPORT] Reconstructing manga objects from stored metadata...');
+                
+                // Dynamic import of Manga class (ES module, works in Electron renderer)
+                let Manga;
+                try {
+                    let module = await import('../../mjs/engine/Manga.mjs');
+                    Manga = module.default;
+                } catch(e) {
+                    this._log('[IMPORT] Failed to import Manga class: ' + e.message);
+                    this.set('_statusText', 'Error restoring queue state');
                     this.set('_visible', true);
                     return;
                 }
-                this._log('[IMPORT] Re-resolving ' + resolvedUrls.length + ' manga objects...');
-                this.set('_statusText', 'Re-resolving ' + resolvedUrls.length + ' manga (fast)...');
                 
-                // Use high concurrency (20) with no delay for fast re-resolve
-                let concurrency = Math.min(20, resolvedUrls.length);
-                for (let i = 0; i < resolvedUrls.length; i += concurrency) {
-                    let batch = resolvedUrls.slice(i, i + concurrency);
-                    let promises = batch.map(function(idx) {
-                        return self._resolveUrl(idx, urls[idx].url);
-                    });
-                    await Promise.all(promises);
-                    if (i % 100 === 0) {
-                        this.set('_statusText', 'Re-resolving: ' + Math.min(i + concurrency, resolvedUrls.length) + '/' + resolvedUrls.length);
-                    }
-                    // Tiny yield to keep UI responsive
-                    if (i % 500 === 0) {
-                        await new Promise(function(r) { setTimeout(r, 5); });
+                for (let i = 0; i < urls.length; i++) {
+                    let urlItem = urls[i];
+                    if (urlItem.status === 'resolved' && urlItem.mangaMeta) {
+                        let meta = urlItem.mangaMeta;
+                        let connector = Engine.Connectors.find(function(c) { return c.id === meta.connectorId; });
+                        if (connector) {
+                            let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
+                            self.set('_urls.' + i + '.manga', manga);
+                            self.push('_resolvedMangas', manga);
+                            count++;
+                        } else {
+                            self._log('[IMPORT] Connector not found: ' + meta.connectorId);
+                            self.set('_urls.' + i + '.status', 'failed');
+                            self.set('_urls.' + i + '.error', 'Connector not available: ' + meta.connectorId);
+                        }
                     }
                 }
-                this._log('[IMPORT] Re-resolve complete: ' + self._resolvedMangas.length + ' manga ready');
-                this.set('_statusText', 'Queue restored. ' + self._resolvedMangas.length + ' manga ready.');
+                
+                this._log('[IMPORT] Reconstructed ' + count + ' manga objects (instant)');
+                this.set('_statusText', 'Queue restored. ' + count + ' manga ready.');
                 this.set('_visible', true);
             }
 
@@ -453,6 +456,7 @@
                         url: u.url,
                         status: u.status,
                         manga: null,
+                        mangaMeta: u.mangaMeta || null,
                         error: u.error,
                         chapters: u.chapters || null
                     };
@@ -765,6 +769,12 @@
                     let manga = await connectors[0].getMangaFromURI(uri);
                     this.set('_urls.' + index + '.manga', manga);
                     this.set('_urls.' + index + '.status', 'resolved');
+                    // Store metadata for crash-safe resume (JSON-safe, no functions)
+                    this.set('_urls.' + index + '.mangaMeta', {
+                        connectorId: connectors[0].id,
+                        mangaId: manga.id,
+                        mangaTitle: manga.title
+                    });
                     this.push('_resolvedMangas', manga);
                 } catch (error) {
                     this._log('[IMPORT] ✗ ' + url + ' → ' + error.message);
