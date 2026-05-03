@@ -387,17 +387,22 @@
                         self.set('_urls', data.urls);
                         self.set('_concurrency', data.concurrency || 5);
                         self.set('_batchDelay', data.batchDelay || 500);
-                        self.set('_phase', data.phase || 'resolve-paused');
+                        // Normalize active phases to paused equivalents on restore
+                        // (app was closed mid-download without explicit pause)
+                        let restorePhase = data.phase || 'resolve-paused';
+                        if (restorePhase === 'downloading') restorePhase = 'download-paused';
+                        if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
+                        self.set('_phase', restorePhase);
                         self.set('_processedIndex', data.lastProcessedIndex || 0);
                         self.set('_downloadMangaIndex', data.downloadMangaIndex || 0);
                         self.set('_downloadChapterIndex', data.downloadChapterIndex || 0);
                         self.set('_resolvedMangas', []);
-                        // Recalculate progress
-                        if (data.phase === 'resolve-paused' || data.phase === 'idle') {
+                        // Recalculate progress (use the normalized restorePhase)
+                        if (restorePhase === 'resolve-paused' || restorePhase === 'idle') {
                             let pct = Math.round((data.lastProcessedIndex / data.urls.length) * 100) || 0;
                             self.set('_progressPercent', pct);
                             self.set('_statusText', 'Paused at ' + data.lastProcessedIndex + '/' + data.urls.length + ' URLs');
-                        } else if (data.phase === 'download-paused' || data.phase === 'resolve-done') {
+                        } else if (restorePhase === 'download-paused' || restorePhase === 'resolve-done') {
                             self.set('_progressPercent', data.downloadProgressPercent || 50);
                             self.set('_statusText', 'Restoring manga objects from saved state...');
                             // Reconstruct manga objects from stored metadata (instant, no network)
