@@ -232,6 +232,17 @@
                         <option value="5000">5s</option>
                     </select>
                 </label>
+
+                <label>Page Concurrency:
+                    <select value="{{ _pageConcurrency::change }}">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3" selected>3</option>
+                        <option value="5">5</option>
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                    </select>
+                </label>
             </div>
 
             <div class="url-list">
@@ -312,7 +323,9 @@
                     _downloadChapterIndex: { type: Number, value: 0 },
                     _currentDownloadingManga: { type: String, value: '' },
                     _currentDownloadingChapter: { type: String, value: '' },
-                    _chaptersVersion: { type: Number, value: 0 }
+                    _chaptersVersion: { type: Number, value: 0 },
+                    // Page-level download concurrency
+                    _pageConcurrency: { type: Number, value: 3 }
                 };
             }
 
@@ -387,6 +400,7 @@
                         self.set('_urls', data.urls);
                         self.set('_concurrency', data.concurrency || 5);
                         self.set('_batchDelay', data.batchDelay || 500);
+                        self.set('_pageConcurrency', data.pageConcurrency || 3);
                         // Normalize active phases to paused equivalents on restore
                         // (app was closed mid-download without explicit pause)
                         let restorePhase = data.phase || 'resolve-paused';
@@ -472,6 +486,7 @@
                     urls: urls,
                     concurrency: self._concurrency,
                     batchDelay: self._batchDelay,
+                    pageConcurrency: self._pageConcurrency,
                     lastProcessedIndex: self._processedIndex,
                     downloadMangaIndex: self._downloadMangaIndex,
                     downloadChapterIndex: self._downloadChapterIndex,
@@ -925,7 +940,8 @@
             }
 
             /**
-             * Download a single chapter using the same mechanism as DownloadJob:
+             * Download a single chapter's pages using a worker pool pattern.
+             * At most _pageConcurrency page fetches are in-flight at any time.
              * chapter.getPages() → fetch blobs → Engine.Storage.saveChapterPages()
              */
             async _downloadChapter(chapter) {
@@ -943,15 +959,30 @@
 
                     // Handle manga pages (array of URLs)
                     if (pages instanceof Array) {
-                        let blobs = [];
-                        for (let p = 0; p < pages.length; p++) {
-                            let response = await fetch(pages[p], chapter.manga.connector.requestOptions || {});
-                            if (response.status !== 200) {
-                                throw new Error('Page ' + pages[p] + ' returned status ' + response.status);
+                        let maxConcurrent = this._pageConcurrency || 3;
+                        let results = [];
+                        let currentIndex = 0;
+                        let self = this;
+                        let requestOptions = chapter.manga.connector.requestOptions || {};
+
+                        async function worker() {
+                            while (currentIndex < pages.length) {
+                                let i = currentIndex++;
+                                let response = await fetch(pages[i], requestOptions);
+                                if (response.status !== 200) {
+                                    throw new Error('Page ' + pages[i] + ' returned status ' + response.status);
+                                }
+                                results[i] = await response.blob();
                             }
-                            blobs.push(await response.blob());
                         }
-                        await Engine.Storage.saveChapterPages(chapter, blobs);
+
+                        let workers = [];
+                        for (let w = 0; w < maxConcurrent; w++) {
+                            workers.push(worker());
+                        }
+                        await Promise.all(workers);
+
+                        await Engine.Storage.saveChapterPages(chapter, results);
                         return true;
                     }
 
