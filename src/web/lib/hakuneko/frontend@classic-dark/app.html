@@ -167,7 +167,7 @@
             _onImportUrls(e) {
                 let importQueue = this.shadowRoot.querySelector('hakuneko-import-queue');
                 if (importQueue) {
-                    importQueue.openFilePicker();
+                    importQueue.showPanel();
                 } else {
                     console.error('Import queue component not found in app shadow DOM!');
                 }
