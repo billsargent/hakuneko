@@ -437,7 +437,7 @@
                 // Dynamic import of Manga class (ES module, works in Electron renderer)
                 let Manga;
                 try {
-                    let module = await import('../../mjs/engine/Manga.mjs');
+                    let module = await import('../../../mjs/engine/Manga.mjs');
                     Manga = module.default;
                 } catch(e) {
                     this._log('[IMPORT] Failed to import Manga class: ' + e.message);
