@@ -250,7 +250,7 @@
                         </div>
                         <div class$="url-chapters [[ _getChaptersVisibility(item) ]]">
                             <details>
-                                <summary>Chapters ([[ _getChaptersDone(item) ]] / [[ _getChaptersTotal(item) ]])</summary>
+                                <summary>Chapters ([[ _getChaptersDone(item, _chaptersVersion) ]] / [[ _getChaptersTotal(item, _chaptersVersion) ]])</summary>
                                 <template is="dom-repeat" items="[[ item.chapters ]]" initial-count="100">
                                     <div class="chapter-item">
                                         <span class="chapter-icon"><i class$="fas [[ _getChapterIcon(item.status) ]] [[ _getUrlStatusClass(item.status) ]]"></i></span>
@@ -311,7 +311,8 @@
                     _downloadMangaIndex: { type: Number, value: 0 },
                     _downloadChapterIndex: { type: Number, value: 0 },
                     _currentDownloadingManga: { type: String, value: '' },
-                    _currentDownloadingChapter: { type: String, value: '' }
+                    _currentDownloadingChapter: { type: String, value: '' },
+                    _chaptersVersion: { type: Number, value: 0 }
                 };
             }
 
@@ -862,6 +863,8 @@
                             if (urlIdx >= 0) {
                                 this.set('_urls.' + urlIdx + '.chapters.' + c + '.status', success ? 'downloaded' : 'failed');
                             }
+                            // Bump version to force computed property re-evaluation for chapter counts
+                            this.set('_chaptersVersion', this._chaptersVersion + 1);
                             if (success) {
                                 this._log('[IMPORT]     ✓ ' + chapter.title + ' saved');
                             } else {
