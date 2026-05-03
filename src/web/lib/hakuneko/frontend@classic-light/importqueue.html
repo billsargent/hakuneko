@@ -887,11 +887,32 @@
                     }
 
                     if (this._phase === 'downloading') {
-                        this._log('[IMPORT] ✓ All downloads complete!');
-                        this.set('_phase', 'done');
-                        this.set('_statusText', 'All downloads finished!');
-                        this.set('_progressPercent', 100);
-                        this._clearSavedState();
+                        // Count actual results
+                        let totalDownloaded = 0;
+                        let totalFailed = 0;
+                        for (let i = 0; i < urls.length; i++) {
+                            if (urls[i].status === 'resolved' && urls[i].chapters) {
+                                for (let c = 0; c < urls[i].chapters.length; c++) {
+                                    if (urls[i].chapters[c].status === 'downloaded') totalDownloaded++;
+                                    if (urls[i].chapters[c].status === 'failed') totalFailed++;
+                                }
+                            }
+                        }
+                        this._log('[IMPORT] ✓ Downloads finished: ' + totalDownloaded + ' OK, ' + totalFailed + ' failed');
+                        if (totalFailed === 0 && totalDownloaded > 0) {
+                            this.set('_phase', 'done');
+                            this.set('_statusText', 'All downloads finished! (' + totalDownloaded + ' chapters)');
+                            this.set('_progressPercent', 100);
+                            this._clearSavedState();
+                        } else if (totalDownloaded > 0) {
+                            this.set('_phase', 'download-paused');
+                            this.set('_statusText', 'Partial: ' + totalDownloaded + ' downloaded, ' + totalFailed + ' failed. Resume to retry.');
+                            this._saveState();
+                        } else {
+                            this.set('_phase', 'resolve-done');
+                            this.set('_statusText', 'All downloads failed. Check URLs and try again.');
+                            this._saveState();
+                        }
                     }
                 } catch (error) {
                     this._log('[IMPORT] Download error: ' + error.message);
