@@ -968,6 +968,7 @@
                         async function worker() {
                             while (currentIndex < pages.length) {
                                 let i = currentIndex++;
+                                self._log('[PAGE] Fetching (' + (i+1) + '/' + pages.length + '): ' + pages[i]);
                                 let response = await fetch(pages[i], requestOptions);
                                 if (response.status !== 200) {
                                     throw new Error('Page ' + pages[i] + ' returned status ' + response.status);
