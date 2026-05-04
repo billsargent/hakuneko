@@ -76,6 +76,48 @@ image::screenshot-video.png[link=screenshot-video.png, width=720, title="HakuNek
 
 ---
 
+=== Local Modifications
+
+This fork includes significant enhancements to the Import Queue Manager and various bug fixes. Below is a summary of all modifications:
+
+==== Import URLs Feature
+
+A complete Import Queue system has been added that allows batch downloading manga and anime from a list of URLs in a text file.
+
+* **Two-Phase Workflow**: Phase 1 resolves imported URLs to identify the corresponding manga/connector. Phase 2 downloads all chapters using the built-in engine (CBZ/PDF/EPUB).
+* **Crash-Safe Persistence**: Queue state is saved after every 5 chapters. On app restart, the user is prompted to resume from where they left off.
+* **Instant Resume**: Manga metadata (connector, ID, title) is stored alongside resolved URLs, so manga objects are reconstructed instantly in memory on resume — no slow network re-resolve needed.
+* **UI Feedback**: Phase badges, per-URL chapter lists with expandable details, chapter-level status icons, and separate control buttons for resolve vs download phases.
+* **Chunked Large File Handling**: Files with 10,000+ URLs are processed in chunks of 500 with periodic UI yields to keep the interface responsive.
+
+==== Configurable Page Concurrency
+
+Added a "Page Concurrency" dropdown (values 1–20, default 3) to the Import Queue UI that controls how many pages are downloaded simultaneously per chapter. Uses a worker pool pattern — N concurrent workers pull pages from a shared index counter, preserving page order. Setting is persisted across sessions and takes effect on the next chapter download.
+
+==== Page URL Logging
+
+When downloading chapters, each page URL being fetched is logged to the terminal with the format `[PAGE] Fetching (N/total): url`. This provides real-time visibility into which pages are being downloaded, especially when multiple pages are being fetched concurrently.
+
+==== Detailed Console Logging
+
+Extensive `[IMPORT]`-prefixed logging throughout the Import Queue, all routed from the Electron renderer to the main process terminal via IPC (visible when running `npm start`). Covers file picking, queue controls, URL resolution progress, chapter fetching, state save/restore, and page-level download progress.
+
+==== Bug Fixes
+
+* *False "All Complete" When Downloads Failed*: Previously, when all chapters finished processing (whether successful or failed), the queue was declared complete and state was cleared. Now honors failure counts — partial failures show a "Resume" button, total failures return to resolve-done state for URL re-review.
+* *Missing Buttons on App Restart*: When the app was closed mid-download, saved phase "downloading" didn't match any button conditions. Fixed by normalizing active phases on restore.
+* *Live Chapter Count Updates*: Added a version counter to force Polymer to re-evaluate computed bindings, so chapter counts update in real-time during download.
+* *notifyPath Bug*: Polymer's `notifyPath()` notified the UI of changes but did not actually modify underlying array data. Changed to `set()` which both mutates data and notifies Polymer. Was causing "0 OK, 0 failed" results after 30+ minutes of processing.
+* *Shadow DOM Cross-Boundary Event*: The "Import URLs" button couldn't find the import-queue element across shadow DOM boundaries. Fixed by dispatching a composed+bubbling `CustomEvent`.
+* *Dynamic Import Path*: Fixed Manga class import from `../../mjs/engine/Manga.mjs` to `../../../mjs/engine/Manga.mjs` (3 levels up to `src/web/`).
+* *Remote Auto-Updates Disabled*: Disabled to prevent overwriting local modifications.
+
+All changes are applied identically to both `@classic-dark` and `@classic-light` themes.
+
+For a detailed list of all changes, see the link:CHANGELOG.md[Changelog].
+
+---
+
 === Development
 
 For developer documentation please check the link:https://github.com/manga-download/hakuneko/wiki/Developer-Manual[Wiki]
