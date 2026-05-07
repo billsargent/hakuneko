@@ -551,16 +551,22 @@ export default class Storage {
     async _saveChapterPagesCBZ(archive, pageData, manga, chapterName = '') {
         let zip = new JSZip();
 
-        // Fetch rich manga metadata if the connector supports it
         let mangaName = manga.title;
-        let metadata = {};
-        try {
-            if (manga.connector && typeof manga.connector._getMangaInfo === 'function') {
-                let mangaInfo = await manga.connector._getMangaInfo(manga);
-                metadata = mangaInfo.metadata || {};
+        let metadata = manga.metadata || {};
+
+        // Only fetch metadata from website if not already populated (cache on manga object to avoid flooding per-chapter)
+        if (manga.connector && typeof manga.connector._getMangaInfo === 'function') {
+            let hasMetadata = metadata.author || metadata.artist || metadata.genre || metadata.year || metadata.description;
+            if (!hasMetadata) {
+                try {
+                    let mangaInfo = await manga.connector._getMangaInfo(manga);
+                    metadata = mangaInfo.metadata || {};
+                    // Cache on the manga object so subsequent chapters reuse it without another HTTP request
+                    manga.metadata = metadata;
+                } catch (error) {
+                    console.warn('Failed to fetch manga info:', error);
+                }
             }
-        } catch (error) {
-            console.warn('Failed to fetch manga info:', error);
         }
 
         let comicFile = Engine.ComicInfoGenerator.createComicInfoXML(mangaName, chapterName, pageData.length, metadata);
