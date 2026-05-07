@@ -448,7 +448,7 @@ export default class Storage {
             }
             if (Engine.Settings.chapterFormat.value === extensions.cbz) {
                 this._createDirectoryChain(this.path.dirname(output));
-                promise = this._saveChapterPagesCBZ(output, pageData, chapter.manga.title, chapter.title)
+                promise = this._saveChapterPagesCBZ(output, pageData, chapter.manga, chapter.title)
                     .then(() => this._runPostChapterDownloadCommand(chapter, output));
             }
             if (Engine.Settings.chapterFormat.value === extensions.pdf) {
@@ -548,10 +548,22 @@ export default class Storage {
      * Create and save pages to the given archive file.
      * Callback will be executed after completion and provided with an array of errors (or an empty array when no errors occured).
      */
-    _saveChapterPagesCBZ(archive, pageData, mangaName = '', chapterName = '') {
+    async _saveChapterPagesCBZ(archive, pageData, manga, chapterName = '') {
         let zip = new JSZip();
 
-        let comicFile = Engine.ComicInfoGenerator.createComicInfoXML(mangaName, chapterName, pageData.length);
+        // Fetch rich manga metadata if the connector supports it
+        let mangaName = manga.title;
+        let metadata = {};
+        try {
+            if (manga.connector && typeof manga.connector._getMangaInfo === 'function') {
+                let mangaInfo = await manga.connector._getMangaInfo(manga);
+                metadata = mangaInfo.metadata || {};
+            }
+        } catch (error) {
+            console.warn('Failed to fetch manga info:', error);
+        }
+
+        let comicFile = Engine.ComicInfoGenerator.createComicInfoXML(mangaName, chapterName, pageData.length, metadata);
         zip.file('ComicInfo.xml', comicFile);
 
         pageData.forEach(page => {

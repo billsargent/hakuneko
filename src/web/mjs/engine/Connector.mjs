@@ -654,6 +654,19 @@ export default class Connector {
     }
 
     /**
+     * Method to get rich metadata for a manga from a website.
+     * Connector implementations can override this method to scrape and populate
+     * the manga's metadata object with fields like author, artist, description,
+     * genre, year, month, day, url, and isbn.
+     * The default implementation returns the manga unchanged.
+     * @param {Manga} manga - The manga for which the metadata shall be fetched
+     * @returns {Promise<Manga>} - The manga with populated metadata
+     */
+    async _getMangaInfo(manga) {
+        return manga;
+    }
+
+    /**
      *
      */
     handleConnectorURI( uri ) {

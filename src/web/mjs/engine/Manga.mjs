@@ -19,7 +19,7 @@ const statusDefinitions = {
 export default class Manga extends EventTarget {
 
     // TODO: use dependency injection instead of globals for Engine.Settings, Engine.Storage, all Enums
-    constructor( connector, id, title, status ) {
+    constructor( connector, id, title, status, metadata = {} ) {
         super();
         this.connector = connector;
         this.id = id;
@@ -27,6 +27,18 @@ export default class Manga extends EventTarget {
         this.status = status;
         this.chapterCache = [];
         this.existingChapters = [];
+        this.metadata = {
+            author: '',
+            artist: '',
+            description: '',
+            genre: '',
+            year: '',
+            month: '',
+            day: '',
+            url: '',
+            isbn: '',
+            ...metadata
+        };
 
         if( !this.status ) {
             this.updateStatus();
