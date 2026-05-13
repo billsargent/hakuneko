@@ -37,8 +37,7 @@ export default class Storage {
         this.config = this.path.join(this.storageDir, 'hakuneko.');
         this.dbPath = this.path.join(this.storageDir, 'hakuneko.db');
 
-        // Use temp directory inside local storage/ folder (immune to OS temp wipes)
-        this.temp = this.path.join(appPath, 'storage', 'temp');
+        this.temp = this.path.join(require('os').tmpdir(), 'hakuneko');
         this._createDirectoryChain(this.temp);
 
         // Initialize SQLite database for import queue
@@ -115,119 +114,124 @@ export default class Storage {
 
     /**
      * Save the import queue state to SQLite database.
+     * Falls back to JSON file if SQLite is unavailable.
      */
     async saveImportQueue(urls, state) {
         try {
-            if (!this._db) {
-                return Promise.reject(new Error('SQLite database not available'));
-            }
-            if (!urls) {
-                urls = [];
-            }
-            if (!state) {
-                state = {};
-            }
+            if (this._db) {
+                this._db.run('DELETE FROM import_queue');
+                this._db.run('DELETE FROM queue_state');
 
-            this._db.run('DELETE FROM import_queue');
-            this._db.run('DELETE FROM queue_state');
-
-            // Insert each URL as a row
-            let stmt = this._db.prepare(`INSERT INTO import_queue (id, url, status, error, connector_id, manga_id, manga_title, chapters_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-            for (let i = 0; i < urls.length; i++) {
-                let u = urls[i];
-                stmt.run([
-                    i,
-                    u.url || '',
-                    u.status || 'pending',
-                    u.error || null,
-                    u.mangaMeta ? u.mangaMeta.connectorId : null,
-                    u.mangaMeta ? u.mangaMeta.mangaId : null,
-                    u.mangaMeta ? u.mangaMeta.mangaTitle : null,
-                    u.chapters ? JSON.stringify(u.chapters) : null
-                ]);
-            }
-            stmt.free();
-
-            // Insert queue state as key-value pairs
-            let stateKeys = ['phase', 'concurrency', 'batchDelay', 'pageConcurrency', 'lastProcessedIndex', 'downloadMangaIndex', 'downloadChapterIndex', 'downloadProgressPercent'];
-            for (let key of stateKeys) {
-                if (state[key] !== undefined) {
-                    this._db.run('INSERT OR REPLACE INTO queue_state (key, value) VALUES (?, ?)', [key, String(state[key])]);
+                // Insert each URL as a row
+                let stmt = this._db.prepare(`INSERT INTO import_queue (id, url, status, error, connector_id, manga_id, manga_title, chapters_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+                for (let i = 0; i < urls.length; i++) {
+                    let u = urls[i];
+                    stmt.run([
+                        i,
+                        u.url || '',
+                        u.status || 'pending',
+                        u.error || null,
+                        u.mangaMeta ? u.mangaMeta.connectorId : null,
+                        u.mangaMeta ? u.mangaMeta.mangaId : null,
+                        u.mangaMeta ? u.mangaMeta.mangaTitle : null,
+                        u.chapters ? JSON.stringify(u.chapters) : null
+                    ]);
                 }
-            }
+                stmt.free();
 
-            this._persistDatabase();
-            return Promise.resolve();
+                // Insert queue state as key-value pairs
+                let stateKeys = ['phase', 'concurrency', 'batchDelay', 'pageConcurrency', 'lastProcessedIndex', 'downloadMangaIndex', 'downloadChapterIndex', 'downloadProgressPercent'];
+                for (let key of stateKeys) {
+                    if (state[key] !== undefined) {
+                        this._db.run('INSERT OR REPLACE INTO queue_state (key, value) VALUES (?, ?)', [key, String(state[key])]);
+                    }
+                }
+
+                this._persistDatabase();
+                return Promise.resolve();
+            } else {
+                // Fallback to JSON
+                let data = { urls: urls, phase: state.phase || 'idle' };
+                return this.saveConfig('importqueue', data, 2);
+            }
         } catch (error) {
             console.error('saveImportQueue error:', error.message);
-            return Promise.reject(error);
+            // Fallback to JSON
+            let data = { urls: urls, phase: state.phase || 'idle' };
+            return this.saveConfig('importqueue', data, 2);
         }
     }
 
     /**
      * Load the import queue state from SQLite database.
+     * Falls back to JSON file if SQLite is unavailable.
      */
     async loadImportQueue() {
         try {
-            if (!this._db) {
-                return Promise.reject(new Error('SQLite database not available'));
-            }
+            if (this._db) {
+                // Count rows
+                let countResult = this._db.exec('SELECT COUNT(*) as cnt FROM import_queue');
+                let count = countResult.length > 0 ? countResult[0].values[0][0] : 0;
+                if (count === 0) {
+                    return Promise.reject(new Error('No saved queue state found'));
+                }
 
-            // Count rows
-            let countResult = this._db.exec('SELECT COUNT(*) as cnt FROM import_queue');
-            let count = countResult.length > 0 ? countResult[0].values[0][0] : 0;
-            if (count === 0) {
-                return Promise.reject(new Error('No saved queue state found'));
-            }
-
-            // Load URLs
-            let urlRows = this._db.exec('SELECT id, url, status, error, connector_id, manga_id, manga_title, chapters_json FROM import_queue ORDER BY id');
-            let urls = urlRows[0].values.map(row => {
-                let urlItem = {
-                    url: row[1],
-                    status: row[2],
-                    error: row[3],
-                    manga: null,
-                    mangaMeta: null,
-                    chapters: null
-                };
-                if (row[4] && row[5] && row[6]) {
-                    urlItem.mangaMeta = {
-                        connectorId: row[4],
-                        mangaId: row[5],
-                        mangaTitle: row[6]
+                // Load URLs
+                let urlRows = this._db.exec('SELECT id, url, status, error, connector_id, manga_id, manga_title, chapters_json FROM import_queue ORDER BY id');
+                let urls = urlRows[0].values.map(row => {
+                    let urlItem = {
+                        url: row[1],
+                        status: row[2],
+                        error: row[3],
+                        manga: null,
+                        mangaMeta: null,
+                        chapters: null
                     };
-                }
-                if (row[7]) {
-                    try {
-                        urlItem.chapters = JSON.parse(row[7]);
-                    } catch(e) {}
-                }
-                return urlItem;
-            });
+                    if (row[4] && row[5] && row[6]) {
+                        urlItem.mangaMeta = {
+                            connectorId: row[4],
+                            mangaId: row[5],
+                            mangaTitle: row[6]
+                        };
+                    }
+                    if (row[7]) {
+                        try {
+                            urlItem.chapters = JSON.parse(row[7]);
+                        } catch(e) {}
+                    }
+                    return urlItem;
+                });
 
-            // Load state
-            let stateRows = this._db.exec('SELECT key, value FROM queue_state');
-            let state = {};
-            for (let row of stateRows[0].values) {
-                state[row[0]] = row[1];
+                // Load state
+                let stateRows = this._db.exec('SELECT key, value FROM queue_state');
+                let state = {};
+                for (let row of stateRows[0].values) {
+                    state[row[0]] = row[1];
+                }
+
+                return Promise.resolve({
+                    urls: urls,
+                    phase: state.phase || 'idle',
+                    concurrency: parseInt(state.concurrency) || 5,
+                    batchDelay: parseInt(state.batchDelay) || 500,
+                    pageConcurrency: parseInt(state.pageConcurrency) || 3,
+                    lastProcessedIndex: parseInt(state.lastProcessedIndex) || 0,
+                    downloadMangaIndex: parseInt(state.downloadMangaIndex) || 0,
+                    downloadChapterIndex: parseInt(state.downloadChapterIndex) || 0,
+                    downloadProgressPercent: parseInt(state.downloadProgressPercent) || 0
+                });
+            } else {
+                // Fallback to JSON
+                return this.loadConfig('importqueue');
             }
-
-            return Promise.resolve({
-                urls: urls,
-                phase: state.phase || 'idle',
-                concurrency: parseInt(state.concurrency) || 5,
-                batchDelay: parseInt(state.batchDelay) || 500,
-                pageConcurrency: parseInt(state.pageConcurrency) || 3,
-                lastProcessedIndex: parseInt(state.lastProcessedIndex) || 0,
-                downloadMangaIndex: parseInt(state.downloadMangaIndex) || 0,
-                downloadChapterIndex: parseInt(state.downloadChapterIndex) || 0,
-                downloadProgressPercent: parseInt(state.downloadProgressPercent) || 0
-            });
         } catch (error) {
-            console.error('loadImportQueue error:', error.message);
-            return Promise.reject(error);
+            // Fallback to JSON
+            try {
+                return await this.loadConfig('importqueue');
+            } catch(e) {
+                return Promise.reject(error);
+            }
         }
     }
 
@@ -236,12 +240,15 @@ export default class Storage {
      */
     async clearImportQueue() {
         try {
-            if (!this._db) {
-                return;
+            if (this._db) {
+                this._db.run('DELETE FROM import_queue');
+                this._db.run('DELETE FROM queue_state');
+                this._persistDatabase();
             }
-            this._db.run('DELETE FROM import_queue');
-            this._db.run('DELETE FROM queue_state');
-            this._persistDatabase();
+            // Also clear JSON fallback
+            try {
+                await this.saveConfig('importqueue', { urls: [], phase: 'idle' });
+            } catch(e) {}
         } catch (error) {
             console.error('clearImportQueue error:', error.message);
         }
