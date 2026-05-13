@@ -80,10 +80,10 @@ export default class Settings extends EventTarget {
             label: 'Bookmarks Directory',
             description: [
                 'The directory where the bookmark and chaptermark files will be stored.',
-                'This setting has no effect when the application is in portable mode!'
+                'Data now lives in the local storage/ folder within the app directory.'
             ].join('\n'),
-            input: process.env.HAKUNEKO_PORTABLE ? types.disabled : types.directory,
-            value: app.getPath('userData')
+            input: types.disabled,
+            value: app.getAppPath() + '/storage'
         };
 
         this.useSubdirectory = {

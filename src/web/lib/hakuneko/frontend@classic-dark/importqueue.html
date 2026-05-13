@@ -390,7 +390,7 @@
             _checkSavedState() {
                 let self = this;
                 self._log('[IMPORT] Checking for saved/paused queue state...');
-                Engine.Storage.loadConfig('importqueue')
+                Engine.Storage.loadImportQueue()
                     .then(function(data) {
                         if (!data || !data.urls || !data.urls.length) {
                             self._log('[IMPORT] No saved queue state found');
@@ -493,15 +493,14 @@
                     downloadProgressPercent: self._progressPercent,
                     resolvedMangas: self._resolvedMangas.map(function(m) { return m ? { id: m.id } : null; })
                 };
-                Engine.Storage.saveConfig('importqueue', state, 2)
+                Engine.Storage.saveImportQueue(urls, state)
                     .then(function() { self._log('[IMPORT] State saved (phase=' + state.phase + ')'); })
                     .catch(function(error) { self._log('[IMPORT] State save failed: ' + error.message); });
             }
 
             _clearSavedState() {
                 this._log('[IMPORT] Clearing saved queue state');
-                let state = { urls: [], phase: 'idle' };
-                Engine.Storage.saveConfig('importqueue', state, 2).catch(function() {});
+                Engine.Storage.clearImportQueue().catch(function() {});
             }
 
             // ---- UI Helpers ----
