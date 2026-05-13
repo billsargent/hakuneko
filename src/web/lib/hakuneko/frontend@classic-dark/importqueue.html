@@ -630,7 +630,7 @@
                 this.set('_downloadMangaIndex', 0);
                 this.set('_downloadChapterIndex', 0);
                 this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click "Resolve URLs" to begin.');
-                this._clearSavedState();
+                this._saveState();
             }
 
             // ---- Event Handlers ----
@@ -751,6 +751,9 @@
                         this.set('_statusText', 'Resolved ' + processed + '/' + urls.length + ' (' + percent + '%)');
                         this.set('_processedIndex', this._processedIndex + batch.length);
 
+                        // Periodic save every 5 batches for crash recovery
+                        if (batchCount % 5 === 0) { this._saveState(); }
+
                         if (delay > 0 && this._phase === 'resolving' && processed < urls.length) {
                             await new Promise(function(resolve) { setTimeout(resolve, delay); });
                         }
@@ -763,10 +766,12 @@
                         this.set('_phase', 'resolve-done');
                         this.set('_statusText', resolved + ' resolved, ' + failed + ' failed. Ready to download.');
                         this.set('_progressPercent', 100);
+                        this._saveState();
                     }
                 } catch (error) {
                     this._log('[IMPORT] Error: ' + error.message);
                     this.set('_phase', 'resolve-paused');
+                    this._saveState();
                 } finally {
                     this._processing = false;
                 }
