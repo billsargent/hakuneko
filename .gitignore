@@ -1,5 +1,7 @@
 CNAME
 yarn.lock
+/storage/hakuneko.*
+/storage/temp/
 package-lock.json
 node_modules
 *.tar.bz2

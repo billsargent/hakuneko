@@ -29,8 +29,9 @@ export default class Storage {
         // TODO: Use fs-extra which provides more convenience functions (e.g. delete recursive)
         this.fs = require('fs');
         this.path = require('path');
-        this.config = this.path.join(electron.remote.app.getPath('userData'), 'hakuneko.');
-        this.temp = this.path.join(require('os').tmpdir(), 'hakuneko');
+        let appPath = electron.remote.app.getAppPath();
+        this.config = this.path.join(appPath, 'storage', 'hakuneko.');
+        this.temp = this.path.join(appPath, 'storage', 'temp');
         this._createDirectoryChain(this.temp);
 
         this.pdfTargetHeight = 1600;

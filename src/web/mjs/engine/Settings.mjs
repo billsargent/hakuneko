@@ -83,7 +83,7 @@ export default class Settings extends EventTarget {
                 'This setting has no effect when the application is in portable mode!'
             ].join('\n'),
             input: process.env.HAKUNEKO_PORTABLE ? types.disabled : types.directory,
-            value: app.getPath('userData')
+            value: path.join(app.getAppPath(), 'storage')
         };
 
         this.useSubdirectory = {
