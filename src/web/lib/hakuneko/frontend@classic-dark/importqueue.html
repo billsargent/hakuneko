@@ -336,7 +336,11 @@
                 this._urlRecords = [];           // Array of URL data objects
                 this._processedIndex = 0;        // For resolution tracking
                 this._downloadMangaIndex = 0;    // For download tracking
+                // Cache for page URLs, keyed by 'url::chapterId'.
+                // Kept outside Polymer's observable system to avoid IPC serialization bloat.
+                this._pageUrlCache = new Map();
             }
+
 
             async ready() {
                 super.ready();
@@ -525,9 +529,56 @@
                 this.set('_totalUrlCount', this._urlRecords.length);
             }
 
+            // ---- Page URL Cache Helpers ----
+
+            /**
+             * Get page URLs for a chapter from the non-observable Map cache.
+             * Falls back to chapterRec.pageUrls if not in cache (defensive).
+             */
+            _getPageUrlsForChapter(urlItem, chapterRec) {
+                let key = urlItem.url + '::' + chapterRec.chapterId;
+                if (this._pageUrlCache.has(key)) {
+                    return this._pageUrlCache.get(key);
+                }
+                return chapterRec.pageUrls;
+            }
+
+            /**
+             * Reattach page URLs from the cache onto chapter records before saving to IndexedDB.
+             * The caller must call _detachPageUrlsAfterSave() afterward to keep them out of Polymer scope.
+             */
+            _reattachPageUrlsForSave(record) {
+                if (record.chapters) {
+                    for (let c = 0; c < record.chapters.length; c++) {
+                        let ch = record.chapters[c];
+                        let key = record.url + '::' + ch.chapterId;
+                        if (this._pageUrlCache.has(key)) {
+                            ch.pageUrls = this._pageUrlCache.get(key);
+                        }
+                    }
+                }
+            }
+
+            /**
+             * Null out page URLs on chapter records after saving to IndexedDB,
+             * keeping them out of Polymer's observable scope.
+             */
+            _detachPageUrlsAfterSave(record) {
+                if (record.chapters) {
+                    for (let c = 0; c < record.chapters.length; c++) {
+                        let ch = record.chapters[c];
+                        let key = record.url + '::' + ch.chapterId;
+                        if (ch.pageUrls && this._pageUrlCache.has(key)) {
+                            ch.pageUrls = null;
+                        }
+                    }
+                }
+            }
+
             // ---- Public API ----
 
             showPanel() {
+
                 this.set('_visible', true);
                 this.set('_statusText', 'Import Queue Manager');
             }
@@ -560,6 +611,23 @@
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
 
+                    // Strip pageUrls from all records and cache in a plain JS Map.
+                    // This prevents Polymer from serializing millions of URL strings via IPC.
+                    this._pageUrlCache = new Map();
+                    for (let ui = 0; ui < urls.length; ui++) {
+                        let rec = urls[ui];
+                        if (rec.chapters) {
+                            for (let ci = 0; ci < rec.chapters.length; ci++) {
+                                let ch = rec.chapters[ci];
+                                if (ch.pageUrls && ch.pageUrls.length > 0) {
+                                    this._pageUrlCache.set(rec.url + '::' + ch.chapterId, ch.pageUrls);
+                                    ch.pageUrls = null;
+                                }
+                            }
+                        }
+                    }
+                    this._log('[IMPORT] Cached ' + this._pageUrlCache.size + ' chapter page-URL sets in JS Map (out of Polymer scope)');
+
                     // Load records into _urlRecords in chunks with yields to prevent
                     // "Maximum IPC message size exceeded" when Polymer processes display data
                     this._urlRecords = [];
@@ -570,6 +638,7 @@
                         // Yield to allow renderer to process any pending changes
                         await new Promise(function(resolve) { setTimeout(resolve, 0); });
                     }
+
 
 
                     this._processedIndex = 0;
@@ -699,6 +768,7 @@
                 this._urlRecords = [];
                 this._processedIndex = 0;
                 this._downloadMangaIndex = 0;
+                this._pageUrlCache = new Map();
                 this.set('_displayUrls', []);
                 this.set('_totalUrlCount', 0);
                 this.set('_progressPercent', 0);
@@ -731,6 +801,7 @@
                 this.set('_statusText', 'Reading file...');
                 this.set('_expandedUrl', null);
                 this._urlRecords = [];
+                this._pageUrlCache = new Map();
                 this._refreshDisplayUrls();
                 await new Promise(function(resolve) { setTimeout(resolve, 50); });
 
@@ -911,10 +982,19 @@
                             this._log('[IMPORT] PROGRESS: ' + resolved + '/' + this._urlRecords.length + ' resolved (' + pct + '%), ' + failed + ' failed');
                         }
 
-                        // Periodic save to IndexedDB
+                        // Periodic save to IndexedDB (save everything, including newly failed)
                         if (batchCount % 3 === 0 && this._db) {
                             try {
-                                await this._db.putUrls(batch.map(function(idx) { return self._urlRecords[idx]; }));
+                                let batchRecs = batch.map(function(idx) { return self._urlRecords[idx]; });
+                                // Reattach pageUrls from cache before saving
+                                for (let bi = 0; bi < batchRecs.length; bi++) {
+                                    self._reattachPageUrlsForSave(batchRecs[bi]);
+                                }
+                                await this._db.putUrls(batchRecs);
+                                // Detach pageUrls after saving
+                                for (let bi = 0; bi < batchRecs.length; bi++) {
+                                    self._detachPageUrlsAfterSave(batchRecs[bi]);
+                                }
                             } catch(e) {
                                 self._log('[IMPORT] Batch save error: ' + e.message);
                             }
@@ -930,7 +1010,13 @@
                         try {
                             let pendingSave = this._urlRecords.filter(function(u) { return u.lastUpdated < Date.now() - 100; });
                             if (pendingSave.length > 0) {
+                                for (let pi = 0; pi < pendingSave.length; pi++) {
+                                    self._reattachPageUrlsForSave(pendingSave[pi]);
+                                }
                                 await this._db.putUrls(pendingSave);
+                                for (let pi = 0; pi < pendingSave.length; pi++) {
+                                    self._detachPageUrlsAfterSave(pendingSave[pi]);
+                                }
                             }
                         } catch(e) {
                             self._log('[IMPORT] Final save error: ' + e.message);
@@ -1045,13 +1131,26 @@
                     urlItem.chapters = chapterRecords;
                     urlItem.resolveStatus = 'resolved';
 
+                    // Cache pageUrls in the non-observable Map and null them on the record
+                    // to keep them out of Polymer's IPC serialization scope
+                    for (let ci = 0; ci < chapterRecords.length; ci++) {
+                        let ch = chapterRecords[ci];
+                        if (ch.pageUrls && ch.pageUrls.length > 0) {
+                            this._pageUrlCache.set(urlItem.url + '::' + ch.chapterId, ch.pageUrls);
+                            ch.pageUrls = null;
+                        }
+                    }
+
                     // Log success with manga title and chapter count
                     this._log('[IMPORT] OK ' + urlItem.mangaMeta.mangaTitle + ' (' + chapterRecords.length + ' chapters, ' + chapterRecords.filter(function(c) { return c.downloadStatus === 'pages-ready'; }).length + ' with page URLs)');
 
                     // Save this record to IndexedDB immediately for crash safety
+                    // Reattach pageUrls from cache for the save, then detach again
                     if (this._db) {
                         try {
+                            this._reattachPageUrlsForSave(urlItem);
                             await this._db.putUrl(urlItem);
+                            this._detachPageUrlsAfterSave(urlItem);
                         } catch(e) {
                             this._log('[IMPORT] DB save error for ' + url + ': ' + e.message);
                         }
@@ -1118,8 +1217,11 @@
                             if (chapterRec.downloadStatus === 'downloaded') continue;
                             if (chapterRec.downloadStatus === 'failed') continue;
 
+                            // Get page URLs from the non-observable cache (Map), falling back to the record if needed
+                            let pageUrls = this._getPageUrlsForChapter(urlItem, chapterRec);
+
                             // Skip chapters without cached page URLs
-                            if (!chapterRec.pageUrls || chapterRec.pageUrls.length === 0) {
+                            if (!pageUrls || pageUrls.length === 0) {
                                 chapterRec.downloadStatus = 'downloaded'; // nothing to download
                                 continue;
                             }
@@ -1140,11 +1242,11 @@
                                 let requestOptions = connector.requestOptions || {};
 
                                 async function worker() {
-                                    while (currentIndex < chapterRec.pageUrls.length) {
+                                    while (currentIndex < pageUrls.length) {
                                         let pi = currentIndex++;
-                                        let response = await fetch(chapterRec.pageUrls[pi], requestOptions);
+                                        let response = await fetch(pageUrls[pi], requestOptions);
                                         if (response.status !== 200) {
-                                            throw new Error('Page ' + chapterRec.pageUrls[pi] + ' returned status ' + response.status);
+                                            throw new Error('Page ' + pageUrls[pi] + ' returned status ' + response.status);
                                         }
                                         results[pi] = await response.blob();
                                     }
@@ -1185,7 +1287,9 @@
                             // Save chapter status to IndexedDB
                             if (this._db && c % 3 === 0) {
                                 try {
+                                    self._reattachPageUrlsForSave(urlItem);
                                     await this._db.putUrl(urlItem);
+                                    self._detachPageUrlsAfterSave(urlItem);
                                 } catch(e) {
                                     self._log('[IMPORT] Chapter save error: ' + e.message);
                                 }
@@ -1197,10 +1301,16 @@
                         }
                     }
 
-                    // Final save
+                    // Final save - reattach pageUrls from cache for IDB, then detach after
                     if (this._db) {
                         try {
+                            for (let ri = 0; ri < this._urlRecords.length; ri++) {
+                                self._reattachPageUrlsForSave(this._urlRecords[ri]);
+                            }
                             await this._db.putUrls(this._urlRecords);
+                            for (let ri = 0; ri < this._urlRecords.length; ri++) {
+                                self._detachPageUrlsAfterSave(this._urlRecords[ri]);
+                            }
                         } catch(e) {
                             self._log('[IMPORT] Final save error: ' + e.message);
                         }
