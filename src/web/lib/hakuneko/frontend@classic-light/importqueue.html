@@ -499,8 +499,29 @@
 
             _refreshDisplayUrls() {
                 // Only push a small window of records into Polymer for display
+                // Strip heavy pageUrls arrays before Polymer data binding to avoid IPC size limit
                 let slice = this._urlRecords.slice(0, 500);
-                this.set('_displayUrls', slice);
+                let displaySlice = slice.map(function(record) {
+                    let display = {
+                        url: record.url,
+                        resolveStatus: record.resolveStatus,
+                        resolveError: record.resolveError,
+                        mangaMeta: record.mangaMeta,
+                        chapters: null
+                    };
+                    if (record.chapters) {
+                        display.chapters = record.chapters.map(function(ch) {
+                            return {
+                                chapterId: ch.chapterId,
+                                title: ch.title,
+                                downloadStatus: ch.downloadStatus,
+                                downloadError: ch.downloadError
+                            };
+                        });
+                    }
+                    return display;
+                });
+                this.set('_displayUrls', displaySlice);
                 this.set('_totalUrlCount', this._urlRecords.length);
             }
 
@@ -539,7 +560,17 @@
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
 
-                    this._urlRecords = urls;
+                    // Load records into _urlRecords in chunks with yields to prevent
+                    // "Maximum IPC message size exceeded" when Polymer processes display data
+                    this._urlRecords = [];
+                    const CHUNK_SIZE = 500;
+                    for (let i = 0; i < urls.length; i += CHUNK_SIZE) {
+                        let chunk = urls.slice(i, i + CHUNK_SIZE);
+                        this._urlRecords = this._urlRecords.concat(chunk);
+                        // Yield to allow renderer to process any pending changes
+                        await new Promise(function(resolve) { setTimeout(resolve, 0); });
+                    }
+
                     this._processedIndex = 0;
                     this._downloadMangaIndex = 0;
                     this.set('_phase', restorePhase);
@@ -718,13 +749,52 @@
                     return;
                 }
 
-                this.set('_statusText', 'Storing URLs in IndexedDB (' + lines.length + ')...');
+                this.set('_statusText', 'Checking for previously cached records in IndexedDB (' + lines.length + ')...');
 
-                // Insert URL records in batches to keep UI responsive
+                // Insert URL records with dedup: check IDB for existing records
+                // so that reimporting a URL file skips already-resolved manga
                 let records = [];
+                let skippedCount = 0;
+                let partialRetryCount = 0;
+                let failedRetryCount = 0;
                 for (let i = 0; i < lines.length; i++) {
+                    let url = lines[i].trim();
+                    let existingRecord = null;
+                    if (this._db) {
+                        try {
+                            existingRecord = await this._db.getUrl(url);
+                        } catch(e) {
+                            // Ignore lookup errors, treat as new record
+                        }
+                    }
+                    if (existingRecord) {
+                        if (existingRecord.resolveStatus === 'resolved') {
+                            // Check if this manga is fully resolved (all chapters have pageUrls)
+                            let fullyDone = true;
+                            if (existingRecord.chapters) {
+                                for (let c = 0; c < existingRecord.chapters.length; c++) {
+                                    if (!existingRecord.chapters[c].pageUrls || existingRecord.chapters[c].pageUrls.length === 0) {
+                                        fullyDone = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (fullyDone) {
+                                // Fully resolved and cached — skip entirely
+                                this._urlRecords.push(existingRecord);
+                                skippedCount++;
+                                continue;
+                            } else {
+                                // Partially resolved — re-add as pending to fill in missing chapter page URLs
+                                partialRetryCount++;
+                            }
+                        } else if (existingRecord.resolveStatus === 'failed') {
+                            failedRetryCount++;
+                        }
+                        // For partial or failed records, fall through and re-add as pending
+                    }
                     records.push({
-                        url: lines[i].trim(),
+                        url: url,
                         resolveStatus: 'pending',
                         resolveError: null,
                         mangaMeta: null,
@@ -738,7 +808,7 @@
                         }
                         this._urlRecords = this._urlRecords.concat(records);
                         records = [];
-                        this._log('[IMPORT] Stored ' + i + ' URLs...');
+                        this._log('[IMPORT] Stored ' + i + ' URLs (' + skippedCount + ' skipped, ' + partialRetryCount + ' partial, ' + failedRetryCount + ' failed-retry)...');
                         await new Promise(function(resolve) { setTimeout(resolve, 10); });
                     }
                 }
@@ -749,6 +819,10 @@
                     }
                     this._urlRecords = this._urlRecords.concat(records);
                 }
+                if (skippedCount > 0) {
+                    this._log('[IMPORT] Dedup: skipped ' + skippedCount + ' already-resolved manga, retrying ' + partialRetryCount + ' partial + ' + failedRetryCount + ' failed');
+                }
+
 
                 this._processedIndex = 0;
                 this._downloadMangaIndex = 0;
