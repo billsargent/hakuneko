@@ -243,10 +243,15 @@
                         <option value="20">20</option>
                     </select>
                 </label>
+
+                <label>Show list:
+                    <input type="checkbox" checked="{{ _showList::change }}">
+                </label>
             </div>
 
+            <template is="dom-if" if="[[ _showList ]]">
             <div class="url-list">
-                <template is="dom-repeat" items="[[ _urls ]]" initial-count="500" target-framerate="5">
+                <template is="dom-repeat" items="[[ _urls ]]">
                     <div>
                         <div class$="url-item [[ _getUrlItemClass(item.status) ]]" on-click="_onUrlClick">
                             <span class="url-status-icon">
@@ -278,6 +283,7 @@
                     </div>
                 </template>
             </div>
+            </template>
 
         </div>
     </template>
@@ -324,8 +330,10 @@
                     _currentDownloadingManga: { type: String, value: '' },
                     _currentDownloadingChapter: { type: String, value: '' },
                     _chaptersVersion: { type: Number, value: 0 },
-                    // Page-level download concurrency
-                    _pageConcurrency: { type: Number, value: 3 }
+                    // Page-level download concurrency (default 10 for fast connections)
+                    _pageConcurrency: { type: Number, value: 10 },
+                    // Show/hide the URL list (off by default during download to reduce DOM churn)
+                    _showList: { type: Boolean, value: false }
                 };
             }
 
@@ -470,32 +478,36 @@
             }
 
             _saveState() {
-                let self = this;
-                let urls = self._urls.map(function(u) {
-                    return {
-                        url: u.url,
-                        status: u.status,
-                        manga: null,
-                        mangaMeta: u.mangaMeta || null,
-                        error: u.error,
-                        chapters: u.chapters || null
+                try {
+                    let self = this;
+                    let urls = self._urls.map(function(u) {
+                        return {
+                            url: u.url,
+                            status: u.status,
+                            manga: null,
+                            mangaMeta: u.mangaMeta || null,
+                            error: u.error instanceof Error ? u.error.message : u.error,
+                            chapters: u.chapters || null
+                        };
+                    });
+                    let state = {
+                        phase: self._phase,
+                        urls: urls,
+                        concurrency: self._concurrency,
+                        batchDelay: self._batchDelay,
+                        pageConcurrency: self._pageConcurrency,
+                        lastProcessedIndex: self._processedIndex,
+                        downloadMangaIndex: self._downloadMangaIndex,
+                        downloadChapterIndex: self._downloadChapterIndex,
+                        downloadProgressPercent: self._progressPercent,
+                        resolvedMangas: self._resolvedMangas.map(function(m) { return m ? { id: m.id } : null; })
                     };
-                });
-                let state = {
-                    phase: self._phase,
-                    urls: urls,
-                    concurrency: self._concurrency,
-                    batchDelay: self._batchDelay,
-                    pageConcurrency: self._pageConcurrency,
-                    lastProcessedIndex: self._processedIndex,
-                    downloadMangaIndex: self._downloadMangaIndex,
-                    downloadChapterIndex: self._downloadChapterIndex,
-                    downloadProgressPercent: self._progressPercent,
-                    resolvedMangas: self._resolvedMangas.map(function(m) { return m ? { id: m.id } : null; })
-                };
-                Engine.Storage.saveConfig('importqueue', state, 2)
-                    .then(function() { self._log('[IMPORT] State saved (phase=' + state.phase + ')'); })
-                    .catch(function(error) { self._log('[IMPORT] State save failed: ' + error.message); });
+                    Engine.Storage.saveConfig('importqueue', state, 2)
+                        .then(function() { self._log('[IMPORT] State saved (phase=' + state.phase + ')'); })
+                        .catch(function(error) { self._log('[IMPORT] State save failed: ' + error.message); });
+                } catch (error) {
+                    console.error('[IMPORT] Fatal error in _saveState:', error);
+                }
             }
 
             _clearSavedState() {
@@ -677,6 +689,9 @@
                 if (this._processing) return;
                 this.set('_phase', 'downloading');
                 this.set('_expandedUrl', null);
+                // Restart the current manga from chapter 0 to avoid skipping
+                // (saved _downloadChapterIndex may be stale after pause/resume)
+                this.set('_downloadChapterIndex', 0);
                 this._processDownloads();
             }
 
@@ -707,6 +722,16 @@
                 this.set('_statusText', 'Ready');
                 this.set('_expandedUrl', null);
                 this._clearSavedState();
+            }
+
+            // ---- Helper ----
+
+            _countProcessed() {
+                let count = 0;
+                for (let i = 0; i < this._urls.length; i++) {
+                    if (this._urls[i].status === 'resolved' || this._urls[i].status === 'failed') count++;
+                }
+                return count;
             }
 
             // ---- Phase 1: URL Resolution ----
@@ -740,29 +765,42 @@
                         self._log('[IMPORT] Batch ' + batchCount + ': ' + batch.length + ' URLs');
                         batch.forEach(function(item) { self.set('_urls.' + item.index + '.status', 'resolving'); });
 
-                        let promises = batch.map(function(item) { return self._resolveUrl(item.index, item.urlObj.url); });
-                        await Promise.all(promises);
-
-                        let processed = 0;
-                        for (let i = 0; i < urls.length; i++) {
-                            if (urls[i].status === 'resolved' || urls[i].status === 'failed') processed++;
+                        // Track each URL's completion individually to update UI per-item
+                        let pendingCount = batch.length;
+                        batch.forEach(function(item) {
+                            self._resolveUrl(item.index, item.urlObj.url)
+                                .catch(function(error) {
+                                    self._log('[IMPORT] Error resolving URL (catch): ' + error.message);
+                                })
+                                .then(function() {
+                                    pendingCount--;
+                                    let processed = self._countProcessed();
+                                    let percent = Math.round((processed / urls.length) * 100);
+                                    self.set('_progressPercent', percent);
+                                    self.set('_statusText', 'Resolved ' + processed + '/' + urls.length + ' (' + percent + '%)');
+                                });
+                        });
+                        // Wait for all URLs in the batch to finish
+                        while (pendingCount > 0) {
+                            await new Promise(function(resolve) { setTimeout(resolve, 50); });
+                            if (self._phase !== 'resolving') break;
                         }
-                        let percent = Math.round((processed / urls.length) * 100);
-                        this.set('_progressPercent', percent);
-                        this.set('_statusText', 'Resolved ' + processed + '/' + urls.length + ' (' + percent + '%)');
                         this.set('_processedIndex', this._processedIndex + batch.length);
 
                         // Periodic save every 5 batches for crash recovery
                         if (batchCount % 5 === 0) { this._saveState(); }
 
-                        if (delay > 0 && this._phase === 'resolving' && processed < urls.length) {
+                        if (delay > 0 && this._phase === 'resolving') {
                             await new Promise(function(resolve) { setTimeout(resolve, delay); });
                         }
                     }
 
                     if (this._phase === 'resolving') {
-                        let resolved = urls.filter(function(u) { return u.status === 'resolved'; }).length;
-                        let failed = urls.filter(function(u) { return u.status === 'failed'; }).length;
+                        let resolved = 0, failed = 0;
+                        for (let i = 0; i < urls.length; i++) {
+                            if (urls[i].status === 'resolved') resolved++;
+                            else if (urls[i].status === 'failed') failed++;
+                        }
                         this._log('[IMPORT] ✓ URLs resolved: ' + resolved + ' OK, ' + failed + ' failed');
                         this.set('_phase', 'resolve-done');
                         this.set('_statusText', resolved + ' resolved, ' + failed + ' failed. Ready to download.');
@@ -793,7 +831,6 @@
                     if (connectors.length > 1) throw new Error('Too many connectors for ' + uri.href);
 
                     let manga = await connectors[0].getMangaFromURI(uri);
-                    this.set('_urls.' + index + '.manga', manga);
                     this.set('_urls.' + index + '.status', 'resolved');
                     // Store metadata for crash-safe resume (JSON-safe, no functions)
                     this.set('_urls.' + index + '.mangaMeta', {
@@ -801,7 +838,8 @@
                         mangaId: manga.id,
                         mangaTitle: manga.title
                     });
-                    this.push('_resolvedMangas', manga);
+                    // Do NOT store the full Manga object - mangaMeta is sufficient for reconstruction
+                    // Keeping Manga objects for all ~14K resolved URLs causes massive memory growth
                 } catch (error) {
                     this._log('[IMPORT] ✗ ' + url + ' → ' + error.message);
                     this.set('_urls.' + index + '.status', 'failed');
@@ -816,6 +854,11 @@
                 this._processing = true;
                 let self = this;
                 let delay = this._batchDelay;
+
+                // Reconstruct manga objects from stored metadata (mangaMeta was saved during URL resolution)
+                // Manga objects are NOT kept in memory during resolution to conserve RAM,
+                // so we rebuild them here on-demand for the download phase
+                await this._reconstructMangasFromMeta();
 
                 // Get unique resolved manga
                 let mangas = [];
@@ -973,7 +1016,8 @@
                         async function worker() {
                             while (currentIndex < pages.length) {
                                 let i = currentIndex++;
-                                self._log('[PAGE] Fetching (' + (i+1) + '/' + pages.length + '): ' + pages[i]);
+                                // NOTE: Per-page IPC logging removed for performance
+                                // (thousands of IPC.send() calls per chapter overwhelm the Electron bridge)
                                 let response = await fetch(pages[i], requestOptions);
                                 if (response.status !== 200) {
                                     throw new Error('Page ' + pages[i] + ' returned status ' + response.status);

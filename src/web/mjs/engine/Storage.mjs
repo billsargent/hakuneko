@@ -33,6 +33,7 @@ export default class Storage {
         this.config = this.path.join(appPath, 'storage', 'hakuneko.');
         this.temp = this.path.join(appPath, 'storage', 'temp');
         this._createDirectoryChain(this.temp);
+        this._cleanupTempDirectory();
 
         this.pdfTargetHeight = 1600;
         this.fileURISubstitutions = {
@@ -58,13 +59,18 @@ export default class Storage {
      */
     saveConfig(key, value, indentation) {
         return new Promise((resolve, reject) => {
-            this.fs.writeFile(this.config + key, JSON.stringify(value, undefined, indentation), function (error) {
-                if (error) {
-                    reject(error);
-                } else {
-                    resolve();
-                }
-            });
+            try {
+                let json = JSON.stringify(value, undefined, indentation);
+                this.fs.writeFile(this.config + key, json, function (error) {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve();
+                    }
+                });
+            } catch (error) {
+                reject(error);
+            }
         });
     }
 
@@ -162,6 +168,7 @@ export default class Storage {
      * Find all directories/files in the base directory.
      * This key-value map can than be used to look up for existing manga titles (where the key represents the title and the value is always true).
      * Keep in mind that the manga titles in this map are sanitized and may not equal the raw (original) manga title.
+     * Both hashed and non-hashed entries are registered for backward compatibility with existing downloads.
      */
     getExistingMangaTitles(connector) {
         let directory = this._connectorOutputPath(connector);
@@ -171,6 +178,12 @@ export default class Storage {
                 // use key value pairs instead of plain titles to increase performance when looking up a certain manga title
                 entries.forEach(entry => {
                     titleMap[entry] = true;
+                    // Also register the base title without hash suffix for backward compatibility
+                    // e.g., "One Piece [a3f8b2]" also registers as "One Piece"
+                    let stripped = entry.replace(/ \[[0-9a-f]{6}\]$/, '');
+                    if (stripped !== entry) {
+                        titleMap[stripped] = true;
+                    }
                 });
                 return Promise.resolve(titleMap);
             });
@@ -321,13 +334,16 @@ export default class Storage {
     }
 
     /**
-     * Extract file from zip entry to temp and returns a promise that
+     * Extract file from zip entry to a unique temp subdirectory and returns a promise that
      * will be resolved with the URI to the extracted file.
+     * Each extraction gets its own subdirectory to prevent filename collisions
+     * (e.g. multiple chapters all containing "001.jpg").
      */
-    _extractZipEntry(archive, file) {
+    _extractZipEntry(archive, file, extractDir) {
+        this._createDirectoryChain(extractDir);
         return archive.files[file].async('uint8array')
             .then(data => {
-                let name = this.path.join(this.temp, this.path.basename(file));
+                let name = this.path.join(extractDir, this.path.basename(file));
                 // attach timestamp to force reload of already existing, but overwritten temp files
                 let page = encodeURI('file://' + name.replace(/\\/g, '/') + '?ts=' + Date.now());
                 return new Promise((resolve, reject) => {
@@ -348,12 +364,13 @@ export default class Storage {
      * and a reference to the page list (undefined on error).
      */
     _loadChapterPagesEPUB(ebook) {
+        let extractDir = this.path.join(this.temp, 'reader-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9));
         return this._openZipArchive(ebook)
             .then(archive => {
                 let promises = Object.keys(archive.files).filter(file => {
                     return /^OEBPS[/\\]img[/\\][^/\\]+$/.test(file);
                 }).map(file => {
-                    return this._extractZipEntry(archive, file);
+                    return this._extractZipEntry(archive, file, extractDir);
                 });
                 return Promise.all(promises);
             })
@@ -377,12 +394,13 @@ export default class Storage {
      * and a reference to the page list (undefined on error).
      */
     _loadChapterPagesCBZ(cbz) {
+        let extractDir = this.path.join(this.temp, 'reader-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9));
         return this._openZipArchive(cbz)
             .then(archive => {
                 let promises = Object.keys(archive.files).filter(file => {
                     return /^[^/\\]+$/.test(file);
                 }).map(file => {
-                    return this._extractZipEntry(archive, file);
+                    return this._extractZipEntry(archive, file, extractDir);
                 });
                 return Promise.all(promises);
             })
@@ -713,6 +731,18 @@ export default class Storage {
     }
 
     /**
+     * Generate a short 6-character hex hash from a string to use as a unique suffix.
+     */
+    _shortHash(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
+            hash |= 0; // Convert to 32bit integer
+        }
+        return Math.abs(hash).toString(16).padStart(6, '0').substring(0, 6);
+    }
+
+    /**
      * Helper function to generate the path where the connector mangas are stored.
      */
     _connectorOutputPath(connector) {
@@ -730,10 +760,13 @@ export default class Storage {
 
     /**
      * Helper function to generate the path where the manga chapters are stored.
+     * Appends a short hash suffix from the manga's unique ID to prevent
+     * collisions between different mangas with the same title.
      */
     _mangaOutputPath(manga) {
         let output = this._connectorOutputPath(manga.connector);
-        output = this.path.join(output, this.sanatizePath(manga.title));
+        let suffix = manga.id ? ' [' + this._shortHash(manga.id) + ']' : '';
+        output = this.path.join(output, this.sanatizePath(manga.title) + suffix);
         return output;
     }
 
@@ -777,9 +810,71 @@ export default class Storage {
     }
 
     /**
+     * Clean up all files and subdirectories in the temp directory on startup.
+     * Temp files are transient (preload scripts, video chunks, reader extracts)
+     * and are regenerated as needed, so this is safe to run on every launch.
+     */
+    _cleanupTempDirectory() {
+        let entries;
+        try {
+            entries = this.fs.readdirSync(this.temp);
+        } catch (error) {
+            // temp directory doesn't exist or can't be read, nothing to clean
+            return;
+        }
+        for (let entry of entries) {
+            let fullPath = this.path.join(this.temp, entry);
+            try {
+                if (this.fs.statSync(fullPath).isDirectory()) {
+                    // Recursively remove subdirectories (e.g. reader-<timestamp>/)
+                    this._removeDirectoryRecursive(fullPath);
+                } else {
+                    this.fs.unlinkSync(fullPath);
+                }
+            } catch (error) {
+                console.warn('Failed to clean up temp file:', fullPath, error);
+            }
+        }
+    }
+
+    /**
+     * Recursively remove a directory and all its contents.
+     */
+    _removeDirectoryRecursive(directory) {
+        if (!this.fs.existsSync(directory)) {
+            return;
+        }
+        let entries;
+        try {
+            entries = this.fs.readdirSync(directory);
+        } catch (error) {
+            console.warn('Failed to read directory for removal:', directory, error);
+            return;
+        }
+        for (let entry of entries) {
+            let fullPath = this.path.join(directory, entry);
+            try {
+                if (this.fs.statSync(fullPath).isDirectory()) {
+                    this._removeDirectoryRecursive(fullPath);
+                } else {
+                    this.fs.unlinkSync(fullPath);
+                }
+            } catch (error) {
+                console.warn('Failed to remove:', fullPath, error);
+            }
+        }
+        try {
+            this.fs.rmdirSync(directory);
+        } catch (error) {
+            console.warn('Failed to remove directory:', directory, error);
+        }
+    }
+
+    /**
      * Create a path without forbidden characters.
     */
     sanatizePath(path) {
+
 
         //replace C0 && C1 control codes
         // eslint-disable-next-line no-control-regex
