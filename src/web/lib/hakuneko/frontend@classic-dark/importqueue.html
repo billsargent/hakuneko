@@ -593,8 +593,30 @@
                 }
                 self._log('[IMPORT] Checking for saved/paused queue state in IndexedDB...');
                 try {
-                    let urls = await this._db.getAllUrls();
-                    if (!urls || urls.length === 0) {
+                    // Use cursor-based loading to avoid "Maximum IPC message size exceeded"
+                    // when IndexedDB transfers records from the storage layer to the renderer.
+                    // We strip pageUrls from each record immediately as it arrives,
+                    // caching them in the non-observable Map before they can trigger IPC.
+                    this._pageUrlCache = new Map();
+                    this._urlRecords = [];
+                    let urlCount = 0;
+                    await this._db.getAllUrlsCursor(function(record) {
+                        // Cache pageUrls in the Map and null them on the record
+                        // before it enters any Polymer-observable data structure
+                        if (record.chapters) {
+                            for (let ci = 0; ci < record.chapters.length; ci++) {
+                                let ch = record.chapters[ci];
+                                if (ch.pageUrls && ch.pageUrls.length > 0) {
+                                    this._pageUrlCache.set(record.url + '::' + ch.chapterId, ch.pageUrls);
+                                    ch.pageUrls = null;
+                                }
+                            }
+                        }
+                        this._urlRecords.push(record);
+                        urlCount++;
+                    }.bind(this));
+
+                    if (urlCount === 0) {
                         self._log('[IMPORT] No saved queue state found');
                         return;
                     }
@@ -604,42 +626,13 @@
                     let batchDelay = await this._db.getMeta('batchDelay');
                     let pageConcurrency = await this._db.getMeta('pageConcurrency');
 
-                    self._log('[IMPORT] Found saved queue: phase=' + phase + ', ' + urls.length + ' URLs');
+                    self._log('[IMPORT] Found saved queue: phase=' + phase + ', ' + urlCount + ' URLs');
+                    self._log('[IMPORT] Cached ' + this._pageUrlCache.size + ' chapter page-URL sets in JS Map (out of Polymer scope)');
 
                     // Normalize active phases to paused equivalents
                     let restorePhase = phase || 'resolve-paused';
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
-
-                    // Strip pageUrls from all records and cache in a plain JS Map.
-                    // This prevents Polymer from serializing millions of URL strings via IPC.
-                    this._pageUrlCache = new Map();
-                    for (let ui = 0; ui < urls.length; ui++) {
-                        let rec = urls[ui];
-                        if (rec.chapters) {
-                            for (let ci = 0; ci < rec.chapters.length; ci++) {
-                                let ch = rec.chapters[ci];
-                                if (ch.pageUrls && ch.pageUrls.length > 0) {
-                                    this._pageUrlCache.set(rec.url + '::' + ch.chapterId, ch.pageUrls);
-                                    ch.pageUrls = null;
-                                }
-                            }
-                        }
-                    }
-                    this._log('[IMPORT] Cached ' + this._pageUrlCache.size + ' chapter page-URL sets in JS Map (out of Polymer scope)');
-
-                    // Load records into _urlRecords in chunks with yields to prevent
-                    // "Maximum IPC message size exceeded" when Polymer processes display data
-                    this._urlRecords = [];
-                    const CHUNK_SIZE = 500;
-                    for (let i = 0; i < urls.length; i += CHUNK_SIZE) {
-                        let chunk = urls.slice(i, i + CHUNK_SIZE);
-                        this._urlRecords = this._urlRecords.concat(chunk);
-                        // Yield to allow renderer to process any pending changes
-                        await new Promise(function(resolve) { setTimeout(resolve, 0); });
-                    }
-
-
 
                     this._processedIndex = 0;
                     this._downloadMangaIndex = 0;
@@ -649,23 +642,26 @@
                     if (pageConcurrency) this.set('_pageConcurrency', pageConcurrency);
 
                     // Calculate progress for display
-                    let resolved = urls.filter(function(u) { return u.resolveStatus === 'resolved'; }).length;
-                    let failed = urls.filter(function(u) { return u.resolveStatus === 'failed'; }).length;
+                    let resolved = 0, failed = 0;
                     let totalChapters = 0;
                     let downloadedChapters = 0;
-                    urls.forEach(function(u) {
+                    for (let ui = 0; ui < this._urlRecords.length; ui++) {
+                        let u = this._urlRecords[ui];
+                        if (u.resolveStatus === 'resolved') resolved++;
+                        else if (u.resolveStatus === 'failed') failed++;
                         if (u.chapters) {
-                            u.chapters.forEach(function(c) {
+                            for (let ci = 0; ci < u.chapters.length; ci++) {
+                                let c = u.chapters[ci];
                                 totalChapters++;
                                 if (c.downloadStatus === 'downloaded') downloadedChapters++;
-                            });
+                            }
                         }
-                    });
+                    }
 
                     if (restorePhase === 'resolve-paused' || restorePhase === 'idle') {
-                        let pct = Math.round(((resolved + failed) / urls.length) * 100) || 0;
+                        let pct = Math.round(((resolved + failed) / urlCount) * 100) || 0;
                         self.set('_progressPercent', pct);
-                        self.set('_statusText', 'Saved: ' + (resolved + failed) + '/' + urls.length + ' resolved, ' + downloadedChapters + '/' + totalChapters + ' chapters downloaded');
+                        self.set('_statusText', 'Saved: ' + (resolved + failed) + '/' + urlCount + ' resolved, ' + downloadedChapters + '/' + totalChapters + ' chapters downloaded');
                     } else if (restorePhase === 'download-paused' || restorePhase === 'resolve-done') {
                         let pct = totalChapters > 0 ? Math.round((downloadedChapters / totalChapters) * 100) : 50;
                         self.set('_progressPercent', pct);

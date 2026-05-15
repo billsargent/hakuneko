@@ -114,6 +114,37 @@ class ImportQueueDB {
     }
 
     /**
+     * Get all URL records using a cursor, calling a callback for each individual record.
+     * This avoids the "Maximum IPC message size exceeded" error that occurs when
+     * store.getAll() transfers the entire dataset in a single IPC message.
+     * The callback receives each record as it's loaded, one at a time.
+     * Callback signature: callback(record)
+     */
+    async getAllUrlsCursor(callback) {
+        const db = await this._getDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('urls', 'readonly');
+            const store = tx.objectStore('urls');
+            const request = store.openCursor();
+            request.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (cursor) {
+                    try {
+                        callback(cursor.value);
+                    } catch(e) {
+                        reject(e);
+                        return;
+                    }
+                    cursor.continue();
+                } else {
+                    resolve();
+                }
+            };
+            request.onerror = (e) => reject(e.target.error || new Error('getAllUrlsCursor failed'));
+        });
+    }
+
+    /**
      * Batch-put multiple URL records in a single transaction.
      */
     async putUrls(records) {
