@@ -182,9 +182,9 @@
             <div class="controls">
                 <span class="status-text">[[ _statusText ]]</span>
 
-                <!-- Phase 1: Resolve URLs -->
+                <!-- Phase 1: Resolve + Pre-fetch URLs -->
                 <template is="dom-if" if="[[ _showResolveStart ]]">
-                    <button class="button primary" on-click="_onStartClick">▶ Resolve URLs</button>
+                    <button class="button primary" on-click="_onStartClick">▶ Resolve & Pre-fetch</button>
                 </template>
                 <template is="dom-if" if="[[ _showResolveResume ]]">
                     <button class="button primary" on-click="_onResumeClick">⟳ Resume Resolving</button>
@@ -251,25 +251,25 @@
 
             <template is="dom-if" if="[[ _showList ]]">
             <div class="url-list">
-                <template is="dom-repeat" items="[[ _urls ]]">
+                <template is="dom-repeat" items="[[ _displayUrls ]]">
                     <div>
-                        <div class$="url-item [[ _getUrlItemClass(item.status) ]]" on-click="_onUrlClick">
+                        <div class$="url-item [[ _getUrlItemClass(item.resolveStatus) ]]" on-click="_onUrlClick">
                             <span class="url-status-icon">
-                                <i class$="fas [[ _getUrlStatusIcon(item.status) ]] [[ _getUrlStatusClass(item.status) ]]"></i>
+                                <i class$="fas [[ _getUrlStatusIcon(item.resolveStatus) ]] [[ _getUrlStatusClass(item.resolveStatus) ]]"></i>
                             </span>
                             <span class="url-text" title$="[[ item.url ]]">[[ item.url ]]</span>
-                            <span class="url-status-text [[ _getUrlStatusClass(item.status) ]]">[[ item.status ]]</span>
+                            <span class="url-status-text [[ _getUrlStatusClass(item.resolveStatus) ]]">[[ item.resolveStatus ]]</span>
                         </div>
                         <div class$="url-error [[ _getErrorVisibility(item, _expandedUrl) ]]">
                             <strong>Error Details:</strong><br>
-                            [[ item.error ]]
+                            [[ item.resolveError ]]
                         </div>
                         <div class$="url-chapters [[ _getChaptersVisibility(item) ]]">
                             <details>
-                                <summary>Chapters ([[ _getChaptersDone(item, _chaptersVersion) ]] / [[ _getChaptersTotal(item, _chaptersVersion) ]])</summary>
+                                <summary>Chapters ([[ _getChaptersDone(item) ]] / [[ _getChaptersTotal(item) ]])</summary>
                                 <template is="dom-repeat" items="[[ item.chapters ]]" initial-count="100">
                                     <div class="chapter-item">
-                                        <span class="chapter-icon"><i class$="fas [[ _getChapterIcon(item.status) ]] [[ _getUrlStatusClass(item.status) ]]"></i></span>
+                                        <span class="chapter-icon"><i class$="fas [[ _getChapterIcon(item.downloadStatus) ]] [[ _getUrlStatusClass(item.downloadStatus) ]]"></i></span>
                                         <span class="chapter-title">[[ item.title ]]</span>
                                     </div>
                                 </template>
@@ -299,7 +299,8 @@
             static get properties() {
                 return {
                     _visible: { type: Boolean, value: false },
-                    _urls: { type: Array, value: function() { return []; } },
+                    // Display-only: a small slice of URL records for the UI list
+                    _displayUrls: { type: Array, value: function() { return []; } },
                     // Phase tracking
                     _phase: { type: String, value: 'idle' }, // idle | resolving | resolve-paused | resolve-done | downloading | download-paused | done
                     _isResolving: { type: Boolean, computed: '_computeIsResolving(_phase)' },
@@ -307,41 +308,87 @@
                     _isRunning: { type: Boolean, computed: '_computeIsRunning(_phase)' },
                     _processing: { type: Boolean, value: false },
                     // Computed UI flags
-                    _showResolveStart: { type: Boolean, computed: '_computeShowResolveStart(_phase, _urls.length, _processing)' },
+                    _showResolveStart: { type: Boolean, computed: '_computeShowResolveStart(_phase, _totalUrlCount, _processing)' },
                     _showResolveResume: { type: Boolean, computed: '_computeShowResolveResume(_phase, _processing)' },
                     _showDownloadStart: { type: Boolean, computed: '_computeShowDownloadStart(_phase, _processing)' },
                     _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase, _processing)' },
                     _showImportButton: { type: Boolean, computed: '_computeShowImportButton(_phase, _processing)' },
-                    _showEmptyMessage: { type: Boolean, computed: '_computeEmptyMessage(_urls.length, _visible)' },
+                    _showEmptyMessage: { type: Boolean, computed: '_computeEmptyMessage(_totalUrlCount, _visible)' },
                     _phaseLabel: { type: String, computed: '_computePhaseLabel(_phase)' },
                     _phaseClass: { type: String, computed: '_computePhaseClass(_phase)' },
                     _phaseSubtext: { type: String, computed: '_computePhaseSubtext(_phase)' },
-                    // Settings
+                    // Settings (Polymer-tracked for UI bindings)
                     _concurrency: { type: Number, value: 5 },
                     _batchDelay: { type: Number, value: 500 },
+                    _pageConcurrency: { type: Number, value: 10 },
                     _progressPercent: { type: Number, value: 0 },
                     _statusText: { type: String, value: 'Ready' },
+                    _totalUrlCount: { type: Number, value: 0 },
                     _expandedUrl: { type: String, value: null },
-                    _processedIndex: { type: Number, value: 0 },
-                    _resolvedMangas: { type: Array, value: function() { return []; } },
-                    // Download tracking
-                    _downloadMangaIndex: { type: Number, value: 0 },
-                    _downloadChapterIndex: { type: Number, value: 0 },
-                    _currentDownloadingManga: { type: String, value: '' },
-                    _currentDownloadingChapter: { type: String, value: '' },
-                    _chaptersVersion: { type: Number, value: 0 },
-                    // Page-level download concurrency (default 10 for fast connections)
-                    _pageConcurrency: { type: Number, value: 10 },
-                    // Show/hide the URL list (off by default during download to reduce DOM churn)
+                    // Show/hide the URL list
                     _showList: { type: Boolean, value: false }
                 };
             }
 
-            ready() {
+            constructor() {
+                super();
+                // Internal plain-JS data (NOT Polymer-tracked) for performance
+                this._urlRecords = [];           // Array of URL data objects
+                this._processedIndex = 0;        // For resolution tracking
+                this._downloadMangaIndex = 0;    // For download tracking
+            }
+
+            async ready() {
                 super.ready();
                 this._electron = require('electron');
                 this.ipc = require('electron').ipcRenderer;
-                this._checkSavedState();
+                // Dynamic import of Manga class (ES module)
+                try {
+                    let module = await import('../../../mjs/engine/Manga.mjs');
+                    this._MangaClass = module.default;
+                } catch(e) {
+                    this._log('[IMPORT] Failed to import Manga class: ' + e.message);
+                }
+                // Dynamic import of Chapter class
+                try {
+                    let module = await import('../../../mjs/engine/Chapter.mjs');
+                    this._ChapterClass = module.default;
+                } catch(e) {
+                    this._log('[IMPORT] Failed to import Chapter class: ' + e.message);
+                }
+                await this._initDB();
+                await this._checkSavedState();
+            }
+
+            // ---- Database Initialization ----
+
+            async _initDB() {
+                try {
+                    let module = await import('../../../mjs/engine/ImportQueueDB.mjs');
+                    this._db = new module.default();
+                    await this._db.open();
+                    this._log('[IMPORT] IndexedDB initialized');
+                } catch(e) {
+                    this._log('[IMPORT] Failed to init IndexedDB: ' + e.message);
+                    this._db = null;
+                }
+            }
+
+            encodeURIComponent(uri) {
+                // Use base64 encode of the URI as the key to avoid IDB key path issues with long/weird URLs
+                if (typeof btoa !== 'undefined') {
+                    try {
+                        return btoa(uri).replace(/[=+\/]/g, function(c) {
+                            if (c === '=') return '';
+                            if (c === '+') return '-';
+                            if (c === '/') return '_';
+                            return c;
+                        });
+                    } catch(e) {
+                        return uri;
+                    }
+                }
+                return uri;
             }
 
             // ---- Computed Properties ----
@@ -358,8 +405,8 @@
 
             _computePhaseLabel(phase) {
                 switch(phase) {
-                    case 'resolving': case 'resolve-paused': return 'Resolving URLs';
-                    case 'resolve-done': return 'URLs Resolved';
+                    case 'resolving': case 'resolve-paused': return 'Resolving & Pre-fetching';
+                    case 'resolve-done': return 'All Pre-fetched';
                     case 'downloading': case 'download-paused': return 'Downloading Chapters';
                     case 'done': return 'Complete';
                     default: return 'Idle';
@@ -375,8 +422,8 @@
             }
             _computePhaseSubtext(phase) {
                 switch(phase) {
-                    case 'idle': return 'Import a file to begin.';
-                    case 'resolve-done': return 'All URLs resolved. Click Start Downloads to begin downloading chapters.';
+                    case 'idle': return 'Import a file to begin. Phase 1 resolves URLs, fetches chapter lists, and caches page URLs.';
+                    case 'resolve-done': return 'All manga pre-fetched with chapter/page data cached in IndexedDB. Ready to download images.';
                     case 'done': return 'All chapters downloaded.';
                     default: return '';
                 }
@@ -391,129 +438,6 @@
             _log(message) {
                 try { this.ipc.send('import-log', message); }
                 catch(e) { console.log(message); }
-            }
-
-            // ---- Saved State ----
-
-            _checkSavedState() {
-                let self = this;
-                self._log('[IMPORT] Checking for saved/paused queue state...');
-                Engine.Storage.loadConfig('importqueue')
-                    .then(function(data) {
-                        if (!data || !data.urls || !data.urls.length) {
-                            self._log('[IMPORT] No saved queue state found');
-                            return;
-                        }
-                        self._log('[IMPORT] Found saved queue: phase=' + data.phase + ', ' + data.urls.length + ' URLs');
-                        self.set('_urls', data.urls);
-                        self.set('_concurrency', data.concurrency || 5);
-                        self.set('_batchDelay', data.batchDelay || 500);
-                        self.set('_pageConcurrency', data.pageConcurrency || 3);
-                        // Normalize active phases to paused equivalents on restore
-                        // (app was closed mid-download without explicit pause)
-                        let restorePhase = data.phase || 'resolve-paused';
-                        if (restorePhase === 'downloading') restorePhase = 'download-paused';
-                        if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
-                        self.set('_phase', restorePhase);
-                        self.set('_processedIndex', data.lastProcessedIndex || 0);
-                        self.set('_downloadMangaIndex', data.downloadMangaIndex || 0);
-                        self.set('_downloadChapterIndex', data.downloadChapterIndex || 0);
-                        self.set('_resolvedMangas', []);
-                        // Recalculate progress (use the normalized restorePhase)
-                        if (restorePhase === 'resolve-paused' || restorePhase === 'idle') {
-                            let pct = Math.round((data.lastProcessedIndex / data.urls.length) * 100) || 0;
-                            self.set('_progressPercent', pct);
-                            self.set('_statusText', 'Paused at ' + data.lastProcessedIndex + '/' + data.urls.length + ' URLs');
-                        } else if (restorePhase === 'download-paused' || restorePhase === 'resolve-done') {
-                            self.set('_progressPercent', data.downloadProgressPercent || 50);
-                            self.set('_statusText', 'Restoring manga objects from saved state...');
-                            // Reconstruct manga objects from stored metadata (instant, no network)
-                            self._reconstructMangasFromMeta();
-                            return;
-                        }
-                        self.set('_visible', true);
-                    })
-                    .catch(function() {});
-            }
-
-            async _reconstructMangasFromMeta() {
-                let self = this;
-                let urls = this._urls;
-                let count = 0;
-                this._log('[IMPORT] Reconstructing manga objects from stored metadata...');
-                
-                // Dynamic import of Manga class (ES module, works in Electron renderer)
-                let Manga;
-                try {
-                    let module = await import('../../../mjs/engine/Manga.mjs');
-                    Manga = module.default;
-                } catch(e) {
-                    this._log('[IMPORT] Failed to import Manga class: ' + e.message);
-                    this.set('_statusText', 'Error restoring queue state');
-                    this.set('_visible', true);
-                    return;
-                }
-                
-                for (let i = 0; i < urls.length; i++) {
-                    let urlItem = urls[i];
-                    if (urlItem.status === 'resolved' && urlItem.mangaMeta) {
-                        let meta = urlItem.mangaMeta;
-                        let connector = Engine.Connectors.find(function(c) { return c.id === meta.connectorId; });
-                        if (connector) {
-                            let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
-                            self.set('_urls.' + i + '.manga', manga);
-                            self.push('_resolvedMangas', manga);
-                            count++;
-                        } else {
-                            self._log('[IMPORT] Connector not found: ' + meta.connectorId);
-                            self.set('_urls.' + i + '.status', 'failed');
-                            self.set('_urls.' + i + '.error', 'Connector not available: ' + meta.connectorId);
-                        }
-                    }
-                }
-                
-                this._log('[IMPORT] Reconstructed ' + count + ' manga objects (instant)');
-                this.set('_statusText', 'Queue restored. ' + count + ' manga ready.');
-                this.set('_visible', true);
-            }
-
-            _saveState() {
-                try {
-                    let self = this;
-                    let urls = self._urls.map(function(u) {
-                        return {
-                            url: u.url,
-                            status: u.status,
-                            manga: null,
-                            mangaMeta: u.mangaMeta || null,
-                            error: u.error instanceof Error ? u.error.message : u.error,
-                            chapters: u.chapters || null
-                        };
-                    });
-                    let state = {
-                        phase: self._phase,
-                        urls: urls,
-                        concurrency: self._concurrency,
-                        batchDelay: self._batchDelay,
-                        pageConcurrency: self._pageConcurrency,
-                        lastProcessedIndex: self._processedIndex,
-                        downloadMangaIndex: self._downloadMangaIndex,
-                        downloadChapterIndex: self._downloadChapterIndex,
-                        downloadProgressPercent: self._progressPercent,
-                        resolvedMangas: self._resolvedMangas.map(function(m) { return m ? { id: m.id } : null; })
-                    };
-                    Engine.Storage.saveConfig('importqueue', state, 2)
-                        .then(function() { self._log('[IMPORT] State saved (phase=' + state.phase + ')'); })
-                        .catch(function(error) { self._log('[IMPORT] State save failed: ' + error.message); });
-                } catch (error) {
-                    console.error('[IMPORT] Fatal error in _saveState:', error);
-                }
-            }
-
-            _clearSavedState() {
-                this._log('[IMPORT] Clearing saved queue state');
-                let state = { urls: [], phase: 'idle' };
-                Engine.Storage.saveConfig('importqueue', state, 2).catch(function() {});
             }
 
             // ---- UI Helpers ----
@@ -540,14 +464,14 @@
                 return status === 'failed' ? 'url-item url-item-failed' : 'url-item';
             }
             _getErrorVisibility(item, expandedUrl) {
-                return (item.status === 'failed' && item.error && item.url === expandedUrl) ? '' : 'hide';
+                return (item.resolveStatus === 'failed' && item.resolveError && item.url === expandedUrl) ? '' : 'hide';
             }
             _getChaptersVisibility(item) {
-                return (item.status === 'resolved' && item.chapters && item.chapters.length > 0) ? '' : 'hide';
+                return (item.resolveStatus === 'resolved' && item.chapters && item.chapters.length > 0) ? '' : 'hide';
             }
             _getChaptersDone(item) {
                 if (!item.chapters) return 0;
-                return item.chapters.filter(function(c) { return c.status === 'downloaded'; }).length;
+                return item.chapters.filter(function(c) { return c.downloadStatus === 'downloaded'; }).length;
             }
             _getChaptersTotal(item) {
                 return item.chapters ? item.chapters.length : 0;
@@ -557,6 +481,8 @@
                     case 'pending':     return 'fa-circle';
                     case 'downloading': return 'fa-spinner fa-pulse';
                     case 'downloaded':  return 'fa-check';
+                    case 'fetching-pages': return 'fa-cloud-download-alt';
+                    case 'pages-ready': return 'fa-images';
                     case 'failed':      return 'fa-exclamation-triangle';
                     default:            return 'fa-circle';
                 }
@@ -564,9 +490,18 @@
 
             _onUrlClick(e) {
                 let item = e.model.item;
-                if (item.status === 'failed') {
+                if (item.resolveStatus === 'failed') {
                     this.set('_expandedUrl', this._expandedUrl === item.url ? null : item.url);
                 }
+            }
+
+            // ---- Refresh Display Urls ----
+
+            _refreshDisplayUrls() {
+                // Only push a small window of records into Polymer for display
+                let slice = this._urlRecords.slice(0, 500);
+                this.set('_displayUrls', slice);
+                this.set('_totalUrlCount', this._urlRecords.length);
             }
 
             // ---- Public API ----
@@ -575,6 +510,173 @@
                 this.set('_visible', true);
                 this.set('_statusText', 'Import Queue Manager');
             }
+
+            // ---- Saved State (IndexedDB) ----
+
+            async _checkSavedState() {
+                let self = this;
+                if (!this._db) {
+                    this._log('[IMPORT] No IndexedDB available');
+                    return;
+                }
+                self._log('[IMPORT] Checking for saved/paused queue state in IndexedDB...');
+                try {
+                    let urls = await this._db.getAllUrls();
+                    if (!urls || urls.length === 0) {
+                        self._log('[IMPORT] No saved queue state found');
+                        return;
+                    }
+
+                    let phase = await this._db.getMeta('phase');
+                    let concurrency = await this._db.getMeta('concurrency');
+                    let batchDelay = await this._db.getMeta('batchDelay');
+                    let pageConcurrency = await this._db.getMeta('pageConcurrency');
+
+                    self._log('[IMPORT] Found saved queue: phase=' + phase + ', ' + urls.length + ' URLs');
+
+                    // Normalize active phases to paused equivalents
+                    let restorePhase = phase || 'resolve-paused';
+                    if (restorePhase === 'downloading') restorePhase = 'download-paused';
+                    if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
+
+                    this._urlRecords = urls;
+                    this._processedIndex = 0;
+                    this._downloadMangaIndex = 0;
+                    this.set('_phase', restorePhase);
+                    if (concurrency) this.set('_concurrency', concurrency);
+                    if (batchDelay) this.set('_batchDelay', batchDelay);
+                    if (pageConcurrency) this.set('_pageConcurrency', pageConcurrency);
+
+                    // Calculate progress for display
+                    let resolved = urls.filter(function(u) { return u.resolveStatus === 'resolved'; }).length;
+                    let failed = urls.filter(function(u) { return u.resolveStatus === 'failed'; }).length;
+                    let totalChapters = 0;
+                    let downloadedChapters = 0;
+                    urls.forEach(function(u) {
+                        if (u.chapters) {
+                            u.chapters.forEach(function(c) {
+                                totalChapters++;
+                                if (c.downloadStatus === 'downloaded') downloadedChapters++;
+                            });
+                        }
+                    });
+
+                    if (restorePhase === 'resolve-paused' || restorePhase === 'idle') {
+                        let pct = Math.round(((resolved + failed) / urls.length) * 100) || 0;
+                        self.set('_progressPercent', pct);
+                        self.set('_statusText', 'Saved: ' + (resolved + failed) + '/' + urls.length + ' resolved, ' + downloadedChapters + '/' + totalChapters + ' chapters downloaded');
+                    } else if (restorePhase === 'download-paused' || restorePhase === 'resolve-done') {
+                        let pct = totalChapters > 0 ? Math.round((downloadedChapters / totalChapters) * 100) : 50;
+                        self.set('_progressPercent', pct);
+                        self.set('_statusText', 'Saved: ' + downloadedChapters + '/' + totalChapters + ' chapters downloaded. ' + resolved + ' manga ready.');
+                    }
+
+                    this._refreshDisplayUrls();
+                    self.set('_visible', true);
+                } catch(e) {
+                    self._log('[IMPORT] Error checking saved state: ' + e.message);
+                }
+            }
+
+            async _saveMeta() {
+                if (!this._db) return;
+                try {
+                    await this._db.putMeta('phase', this._phase);
+                    await this._db.putMeta('concurrency', this._concurrency);
+                    await this._db.putMeta('batchDelay', this._batchDelay);
+                    await this._db.putMeta('pageConcurrency', this._pageConcurrency);
+                } catch(e) {
+                    this._log('[IMPORT] Meta save failed: ' + e.message);
+                }
+            }
+
+            async _clearSavedState() {
+                if (!this._db) return;
+                this._log('[IMPORT] Clearing saved queue state');
+                try {
+                    await this._db.reset();
+                } catch(e) {
+                    this._log('[IMPORT] Clear state failed: ' + e.message);
+                }
+            }
+
+            // ---- Event Handlers ----
+
+            _onCloseClick() {
+                this._log('[IMPORT] Close button clicked');
+                if (this._isRunning) {
+                    if (!confirm('Import is in progress. Pause and close?')) return;
+                    this._pauseQueue();
+                }
+                this.set('_visible', false);
+                this.set('_expandedUrl', null);
+            }
+
+            _onStartClick() {
+                this._log('[IMPORT] ▶ Resolve & Pre-fetch clicked');
+                if (this._processing) return;
+                this.set('_phase', 'resolving');
+                this.set('_expandedUrl', null);
+                this._processUrls();
+            }
+
+            _onResumeClick() {
+                this._log('[IMPORT] ⟳ Resume resolving clicked');
+                if (this._processing) return;
+                this.set('_phase', 'resolving');
+                this.set('_expandedUrl', null);
+                this._processUrls();
+            }
+
+            _onDownloadStartClick() {
+                this._log('[IMPORT] ▶ Start Downloads clicked');
+                if (this._processing) return;
+                this.set('_phase', 'downloading');
+                this._downloadMangaIndex = 0;
+                this.set('_expandedUrl', null);
+                this._processDownloads();
+            }
+
+            _onDownloadResumeClick() {
+                this._log('[IMPORT] ⟳ Resume Downloads clicked');
+                if (this._processing) return;
+                this.set('_phase', 'downloading');
+                // No need to reset to chapter 0 - we track per-chapter status precisely in IndexedDB
+                this.set('_expandedUrl', null);
+                this._processDownloads();
+            }
+
+            _onPauseClick() {
+                this._pauseQueue();
+            }
+
+            async _pauseQueue() {
+                this._log('[IMPORT] ⏸ Pausing...');
+                let pausedPhase = this._phase === 'resolving' ? 'resolve-paused' : 'download-paused';
+                this.set('_phase', pausedPhase);
+                this.set('_statusText', 'Paused (saving state...)');
+                await this._saveMeta();
+                this.set('_statusText', 'Paused');
+            }
+
+            async _onResetClick() {
+                this._log('[IMPORT] 🔄 Reset clicked');
+                if (this._isRunning) {
+                    if (!confirm('Reset will stop the current import. Are you sure?')) return;
+                }
+                this._urlRecords = [];
+                this._processedIndex = 0;
+                this._downloadMangaIndex = 0;
+                this.set('_displayUrls', []);
+                this.set('_totalUrlCount', 0);
+                this.set('_progressPercent', 0);
+                this.set('_phase', 'idle');
+                this.set('_statusText', 'Ready');
+                this.set('_expandedUrl', null);
+                await this._clearSavedState();
+            }
+
+            // ---- File Picker ----
 
             async openFilePicker() {
                 this._log('[IMPORT] Opening file picker dialog...');
@@ -596,7 +698,8 @@
                 this.set('_visible', true);
                 this.set('_statusText', 'Reading file...');
                 this.set('_expandedUrl', null);
-                this.set('_urls', []);
+                this._urlRecords = [];
+                this._refreshDisplayUrls();
                 await new Promise(function(resolve) { setTimeout(resolve, 50); });
 
                 let fs = require('fs');
@@ -611,150 +714,75 @@
 
                 if (lines.length === 0) {
                     alert('The selected file contains no URLs.');
-                    this.set('_urls', []);
                     this.set('_statusText', 'Ready');
                     return;
                 }
 
-                this.set('_statusText', 'Creating URL objects (' + lines.length + ')...');
-                let urlObjects = [];
-                for (let i = 0; i < lines.length; i += 500) {
-                    let chunk = lines.slice(i, i + 500);
-                    for (let j = 0; j < chunk.length; j++) {
-                        urlObjects.push({
-                            url: chunk[j].trim(),
-                            status: 'pending',
-                            manga: null,
-                            error: null,
-                            chapters: null
-                        });
-                    }
-                    if (i % 5000 === 0 && i > 0) {
-                        this._log('[IMPORT] Yield at ' + urlObjects.length + ' objects...');
+                this.set('_statusText', 'Storing URLs in IndexedDB (' + lines.length + ')...');
+
+                // Insert URL records in batches to keep UI responsive
+                let records = [];
+                for (let i = 0; i < lines.length; i++) {
+                    records.push({
+                        url: lines[i].trim(),
+                        resolveStatus: 'pending',
+                        resolveError: null,
+                        mangaMeta: null,
+                        chapters: null,
+                        lastUpdated: Date.now()
+                    });
+                    // Batch into IndexedDB every 500 records
+                    if (i > 0 && i % 500 === 0) {
+                        if (this._db) {
+                            await this._db.putUrls(records);
+                        }
+                        this._urlRecords = this._urlRecords.concat(records);
+                        records = [];
+                        this._log('[IMPORT] Stored ' + i + ' URLs...');
                         await new Promise(function(resolve) { setTimeout(resolve, 10); });
                     }
                 }
+                // Final batch
+                if (records.length > 0) {
+                    if (this._db) {
+                        await this._db.putUrls(records);
+                    }
+                    this._urlRecords = this._urlRecords.concat(records);
+                }
 
-                this.set('_urls', urlObjects);
-                this.set('_processedIndex', 0);
-                this.set('_resolvedMangas', []);
+                this._processedIndex = 0;
+                this._downloadMangaIndex = 0;
                 this.set('_progressPercent', 0);
                 this.set('_phase', 'idle');
-                this.set('_downloadMangaIndex', 0);
-                this.set('_downloadChapterIndex', 0);
-                this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click "Resolve URLs" to begin.');
-                this._saveState();
+                this._refreshDisplayUrls();
+                this.set('_statusText', 'Loaded ' + lines.length + ' URLs. Click "Resolve & Pre-fetch" to begin.');
+                await this._saveMeta();
             }
 
-            // ---- Event Handlers ----
-
-            _onCloseClick() {
-                this._log('[IMPORT] Close button clicked');
-                if (this._isRunning) {
-                    if (!confirm('Import is in progress. Pause and close?')) return;
-                    this._pauseQueue();
-                }
-                this.set('_visible', false);
-                this.set('_expandedUrl', null);
-            }
-
-            _onStartClick() {
-                this._log('[IMPORT] ▶ Resolve URLs clicked');
-                if (this._processing) return;
-                this.set('_phase', 'resolving');
-                this.set('_expandedUrl', null);
-                this._processUrls();
-            }
-
-            _onResumeClick() {
-                this._log('[IMPORT] ⟳ Resume resolving clicked');
-                if (this._processing) return;
-                this.set('_phase', 'resolving');
-                this.set('_expandedUrl', null);
-                this._processUrls();
-            }
-
-            _onDownloadStartClick() {
-                this._log('[IMPORT] ▶ Start Downloads clicked');
-                if (this._processing) return;
-                this.set('_phase', 'downloading');
-                this.set('_downloadMangaIndex', 0);
-                this.set('_downloadChapterIndex', 0);
-                this.set('_expandedUrl', null);
-                this._processDownloads();
-            }
-
-            _onDownloadResumeClick() {
-                this._log('[IMPORT] ⟳ Resume Downloads clicked');
-                if (this._processing) return;
-                this.set('_phase', 'downloading');
-                this.set('_expandedUrl', null);
-                // Restart the current manga from chapter 0 to avoid skipping
-                // (saved _downloadChapterIndex may be stale after pause/resume)
-                this.set('_downloadChapterIndex', 0);
-                this._processDownloads();
-            }
-
-            _onPauseClick() {
-                this._pauseQueue();
-            }
-
-            _pauseQueue() {
-                this._log('[IMPORT] ⏸ Pausing...');
-                let pausedPhase = this._phase === 'resolving' ? 'resolve-paused' : 'download-paused';
-                this.set('_phase', pausedPhase);
-                this.set('_statusText', 'Paused');
-                this._saveState();
-            }
-
-            _onResetClick() {
-                this._log('[IMPORT] 🔄 Reset clicked');
-                if (this._isRunning) {
-                    if (!confirm('Reset will stop the current import. Are you sure?')) return;
-                }
-                this.set('_urls', []);
-                this.set('_resolvedMangas', []);
-                this.set('_progressPercent', 0);
-                this.set('_phase', 'idle');
-                this.set('_processedIndex', 0);
-                this.set('_downloadMangaIndex', 0);
-                this.set('_downloadChapterIndex', 0);
-                this.set('_statusText', 'Ready');
-                this.set('_expandedUrl', null);
-                this._clearSavedState();
-            }
-
-            // ---- Helper ----
-
-            _countProcessed() {
-                let count = 0;
-                for (let i = 0; i < this._urls.length; i++) {
-                    if (this._urls[i].status === 'resolved' || this._urls[i].status === 'failed') count++;
-                }
-                return count;
-            }
-
-            // ---- Phase 1: URL Resolution ----
+            // ---- Phase 1: URL Resolution + Chapter Pre-fetch ----
 
             async _processUrls() {
                 if (this._processing) return;
                 this._processing = true;
                 let self = this;
-                let urls = this._urls;
                 let concurrency = this._concurrency;
                 let delay = this._batchDelay;
                 let batchCount = 0;
 
                 try {
-                    while (this._phase === 'resolving' && this._processedIndex < urls.length) {
+                    while (this._phase === 'resolving' && this._processedIndex < this._urlRecords.length) {
+                        // Find pending records starting from current index
                         let batch = [];
-                        for (let i = this._processedIndex; i < urls.length && batch.length < concurrency; i++) {
-                            if (urls[i].status === 'pending') batch.push({ index: i, urlObj: urls[i] });
+                        for (let i = this._processedIndex; i < this._urlRecords.length && batch.length < concurrency; i++) {
+                            if (this._urlRecords[i].resolveStatus === 'pending') {
+                                batch.push(i);
+                            }
                         }
                         if (batch.length === 0) {
+                            // Check if any pending left
                             let allDone = true;
-                            for (let i = 0; i < urls.length; i++) {
-                                if (urls[i].status === 'pending') { allDone = false; break; }
+                            for (let i = 0; i < this._urlRecords.length; i++) {
+                                if (this._urlRecords[i].resolveStatus === 'pending') { allDone = false; break; }
                             }
                             if (allDone) break;
                             this._processedIndex++;
@@ -762,61 +790,83 @@
                         }
 
                         batchCount++;
-                        self._log('[IMPORT] Batch ' + batchCount + ': ' + batch.length + ' URLs');
-                        batch.forEach(function(item) { self.set('_urls.' + item.index + '.status', 'resolving'); });
-
-                        // Track each URL's completion individually to update UI per-item
-                        let pendingCount = batch.length;
-                        batch.forEach(function(item) {
-                            self._resolveUrl(item.index, item.urlObj.url)
-                                .catch(function(error) {
-                                    self._log('[IMPORT] Error resolving URL (catch): ' + error.message);
-                                })
-                                .then(function() {
-                                    pendingCount--;
-                                    let processed = self._countProcessed();
-                                    let percent = Math.round((processed / urls.length) * 100);
-                                    self.set('_progressPercent', percent);
-                                    self.set('_statusText', 'Resolved ' + processed + '/' + urls.length + ' (' + percent + '%)');
-                                });
+                        // Mark as resolving
+                        batch.forEach(function(idx) {
+                            self._urlRecords[idx].resolveStatus = 'resolving';
                         });
-                        // Wait for all URLs in the batch to finish
-                        while (pendingCount > 0) {
-                            await new Promise(function(resolve) { setTimeout(resolve, 50); });
-                            if (self._phase !== 'resolving') break;
-                        }
-                        this.set('_processedIndex', this._processedIndex + batch.length);
 
-                        // Periodic save every 5 batches for crash recovery
-                        if (batchCount % 5 === 0) { this._saveState(); }
+                        // Process all URLs in the batch concurrently
+                        let promises = batch.map(function(idx) {
+                            return self._resolveAndPrefetch(idx);
+                        });
+                        await Promise.all(promises);
+
+                        this._processedIndex += batch.length;
+                        this._refreshDisplayUrls();
+
+                        // Update progress
+                        let resolved = 0, failed = 0;
+                        for (let i = 0; i < this._urlRecords.length; i++) {
+                            if (this._urlRecords[i].resolveStatus === 'resolved') resolved++;
+                            else if (this._urlRecords[i].resolveStatus === 'failed') failed++;
+                        }
+                        let pct = Math.round(((resolved + failed) / this._urlRecords.length) * 100);
+                        this.set('_progressPercent', pct);
+                        this.set('_statusText', 'Pre-fetched ' + resolved + '/' + this._urlRecords.length + ' (' + pct + '%), ' + failed + ' failed');
+
+                        // Periodic save to IndexedDB
+                        if (batchCount % 3 === 0 && this._db) {
+                            try {
+                                await this._db.putUrls(batch.map(function(idx) { return self._urlRecords[idx]; }));
+                            } catch(e) {
+                                self._log('[IMPORT] Batch save error: ' + e.message);
+                            }
+                        }
 
                         if (delay > 0 && this._phase === 'resolving') {
                             await new Promise(function(resolve) { setTimeout(resolve, delay); });
                         }
                     }
 
+                    // Save all pending records to IndexedDB
+                    if (this._db) {
+                        try {
+                            let pendingSave = this._urlRecords.filter(function(u) { return u.lastUpdated < Date.now() - 100; });
+                            if (pendingSave.length > 0) {
+                                await this._db.putUrls(pendingSave);
+                            }
+                        } catch(e) {
+                            self._log('[IMPORT] Final save error: ' + e.message);
+                        }
+                    }
+
                     if (this._phase === 'resolving') {
                         let resolved = 0, failed = 0;
-                        for (let i = 0; i < urls.length; i++) {
-                            if (urls[i].status === 'resolved') resolved++;
-                            else if (urls[i].status === 'failed') failed++;
+                        for (let i = 0; i < this._urlRecords.length; i++) {
+                            if (this._urlRecords[i].resolveStatus === 'resolved') resolved++;
+                            else if (this._urlRecords[i].resolveStatus === 'failed') failed++;
                         }
-                        this._log('[IMPORT] ✓ URLs resolved: ' + resolved + ' OK, ' + failed + ' failed');
+                        this._log('[IMPORT] ✓ Pre-fetch done: ' + resolved + ' OK, ' + failed + ' failed');
                         this.set('_phase', 'resolve-done');
-                        this.set('_statusText', resolved + ' resolved, ' + failed + ' failed. Ready to download.');
+                        this.set('_statusText', resolved + ' pre-fetched, ' + failed + ' failed. Ready to download.');
                         this.set('_progressPercent', 100);
-                        this._saveState();
+                        await this._saveMeta();
                     }
                 } catch (error) {
                     this._log('[IMPORT] Error: ' + error.message);
                     this.set('_phase', 'resolve-paused');
-                    this._saveState();
                 } finally {
                     this._processing = false;
                 }
             }
 
-            async _resolveUrl(index, url) {
+            /**
+             * Resolve a URL, fetch chapters, and pre-fetch page URLs.
+             * Everything is stored in the internal _urlRecords array.
+             */
+            async _resolveAndPrefetch(index) {
+                let urlItem = this._urlRecords[index];
+                let url = urlItem.url;
                 try {
                     let uri = new URL(url);
                     let connectors = Engine.Connectors.filter(function(c) { return c.canHandleURI && c.canHandleURI(uri); });
@@ -830,24 +880,91 @@
                     if (!connectors.length) throw new Error('No matching connector found for ' + uri.href);
                     if (connectors.length > 1) throw new Error('Too many connectors for ' + uri.href);
 
-                    let manga = await connectors[0].getMangaFromURI(uri);
-                    this.set('_urls.' + index + '.status', 'resolved');
-                    // Store metadata for crash-safe resume (JSON-safe, no functions)
-                    this.set('_urls.' + index + '.mangaMeta', {
-                        connectorId: connectors[0].id,
+                    let connector = connectors[0];
+                    let manga = await connector.getMangaFromURI(uri);
+
+                    // Store manga metadata
+                    urlItem.mangaMeta = {
+                        connectorId: connector.id,
                         mangaId: manga.id,
                         mangaTitle: manga.title
+                    };
+
+                    // Create a proper Manga object to fetch chapters
+                    let Manga = this._MangaClass;
+                    if (!Manga) throw new Error('Manga class not loaded');
+                    let mangaObj = new Manga(connector, manga.id, manga.title);
+
+                    // Fetch chapters
+                    let chapters = await new Promise(function(resolve, reject) {
+                        mangaObj.getChapters(function(error, chs) {
+                            if (error) reject(error); else resolve(chs);
+                        });
                     });
-                    // Do NOT store the full Manga object - mangaMeta is sufficient for reconstruction
-                    // Keeping Manga objects for all ~14K resolved URLs causes massive memory growth
+
+                    if (!chapters || chapters.length === 0) {
+                        urlItem.resolveStatus = 'resolved';
+                        urlItem.chapters = [];
+                        return;
+                    }
+
+                    // For each chapter, fetch page URLs and cache them
+                    let chapterRecords = [];
+                    for (let c = 0; c < chapters.length; c++) {
+                        let chapter = chapters[c];
+                        let record = {
+                            chapterId: chapter.id,
+                            title: chapter.title,
+                            pageUrls: null,
+                            downloadStatus: 'pending',
+                            downloadError: null
+                        };
+
+                        try {
+                            // Pre-fetch page URLs for this chapter
+                            let pages = await new Promise(function(resolve, reject) {
+                                chapter.getPages(function(error, data) {
+                                    if (error) reject(error);
+                                    else resolve(data);
+                                });
+                            });
+
+                            if (pages instanceof Array) {
+                                record.pageUrls = pages;
+                                record.downloadStatus = 'pages-ready'; // page URLs cached, ready to download images
+                            } else {
+                                // Anime/video content - skip
+                                record.downloadStatus = 'failed';
+                                record.downloadError = 'Non-image content (video/stream)';
+                            }
+                        } catch(e) {
+                            record.downloadStatus = 'failed';
+                            record.downloadError = e.message;
+                        }
+
+                        chapterRecords.push(record);
+                    }
+
+                    urlItem.chapters = chapterRecords;
+                    urlItem.resolveStatus = 'resolved';
+
+                    // Save this record to IndexedDB immediately for crash safety
+                    if (this._db) {
+                        try {
+                            await this._db.putUrl(urlItem);
+                        } catch(e) {
+                            this._log('[IMPORT] DB save error for ' + url + ': ' + e.message);
+                        }
+                    }
+
                 } catch (error) {
                     this._log('[IMPORT] ✗ ' + url + ' → ' + error.message);
-                    this.set('_urls.' + index + '.status', 'failed');
-                    this.set('_urls.' + index + '.error', error.message);
+                    urlItem.resolveStatus = 'failed';
+                    urlItem.resolveError = error.message;
                 }
             }
 
-            // ---- Phase 2: Chapter Downloads (using DownloadJob's internal mechanism) ----
+            // ---- Phase 2: Chapter Downloads (from cached data) ----
 
             async _processDownloads() {
                 if (this._processing) return;
@@ -855,109 +972,149 @@
                 let self = this;
                 let delay = this._batchDelay;
 
-                // Reconstruct manga objects from stored metadata (mangaMeta was saved during URL resolution)
-                // Manga objects are NOT kept in memory during resolution to conserve RAM,
-                // so we rebuild them here on-demand for the download phase
-                await this._reconstructMangasFromMeta();
-
-                // Get unique resolved manga
-                let mangas = [];
-                let seenIds = {};
-                let urls = this._urls;
-                for (let i = 0; i < urls.length; i++) {
-                    if (urls[i].status === 'resolved' && urls[i].manga && !seenIds[urls[i].manga.id]) {
-                        seenIds[urls[i].manga.id] = true;
-                        mangas.push(urls[i]);
+                // Gather all resolved manga records in order
+                let mangaRecords = [];
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].resolveStatus === 'resolved') {
+                        mangaRecords.push(this._urlRecords[i]);
                     }
                 }
-                this._log('[IMPORT] Starting downloads for ' + mangas.length + ' unique manga');
+                this._log('[IMPORT] Starting downloads for ' + mangaRecords.length + ' manga (from cached data)');
 
                 try {
-                    for (let m = this._downloadMangaIndex; m < mangas.length && this._phase === 'downloading'; m++) {
-                        let urlItem = mangas[m];
-                        let manga = urlItem.manga;
+                    for (let m = this._downloadMangaIndex; m < mangaRecords.length && this._phase === 'downloading'; m++) {
+                        let urlItem = mangaRecords[m];
+                        let meta = urlItem.mangaMeta;
                         this._downloadMangaIndex = m;
-                        this.set('_currentDownloadingManga', manga.title);
-                        this.set('_statusText', 'Fetching chapters for: ' + manga.title + ' (' + (m+1) + '/' + mangas.length + ')');
-                        this._log('[IMPORT] Processing manga ' + (m+1) + '/' + mangas.length + ': ' + manga.title);
 
-                        // Fetch chapters
-                        let chapters = [];
-                        try {
-                            chapters = await new Promise(function(resolve, reject) {
-                                manga.getChapters(function(error, chs) {
-                                    if (error) reject(error); else resolve(chs);
-                                });
-                            });
-                        } catch (error) {
-                            this._log('[IMPORT]   └─ Failed to get chapters: ' + error.message);
+                        // Reconstruct manga object on demand
+                        let connector = Engine.Connectors.find(function(c) { return c.id === meta.connectorId; });
+                        if (!connector) {
+                            this._log('[IMPORT] Connector not found: ' + meta.connectorId);
+                            continue;
+                        }
+                        let Manga = this._MangaClass;
+                        if (!Manga) { this._log('[IMPORT] Manga class not loaded'); continue; }
+                        let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
+
+                        if (!urlItem.chapters || urlItem.chapters.length === 0) {
+                            this._log('[IMPORT]   └─ No chapters for ' + meta.mangaTitle);
                             continue;
                         }
 
-                        if (!chapters || chapters.length === 0) {
-                            this._log('[IMPORT]   └─ No chapters found');
-                            continue;
+                        this.set('_statusText', 'Downloading: ' + meta.mangaTitle + ' (' + (m+1) + '/' + mangaRecords.length + ' manga)');
+                        this._log('[IMPORT] Processing manga ' + (m+1) + '/' + mangaRecords.length + ': ' + meta.mangaTitle + ' (' + urlItem.chapters.length + ' chapters)');
+
+                        // Pre-compute total for progress
+                        let totalChapters = 0;
+                        for (let i = 0; i < this._urlRecords.length; i++) {
+                            if (this._urlRecords[i].chapters) totalChapters += this._urlRecords[i].chapters.length;
                         }
 
-                        // Find the urlItem index in _urls to update
-                        let urlIdx = this._urls.indexOf(urlItem);
+                        for (let c = 0; c < urlItem.chapters.length && this._phase === 'downloading'; c++) {
+                            let chapterRec = urlItem.chapters[c];
 
-                        // Download each chapter
-                        let downloadStartIdx = (m === this._downloadMangaIndex) ? this._downloadChapterIndex : 0;
-                        for (let c = downloadStartIdx; c < chapters.length && this._phase === 'downloading'; c++) {
-                            let chapter = chapters[c];
-                            this._downloadChapterIndex = c;
-                            this.set('_currentDownloadingChapter', chapter.title);
+                            // Skip already downloaded or failed chapters
+                            if (chapterRec.downloadStatus === 'downloaded') continue;
+                            if (chapterRec.downloadStatus === 'failed') continue;
 
-                            // Update UI - store chapter info and set status to downloading
-                            if (urlIdx >= 0) {
-                                if (!this._urls[urlIdx].chapters) {
-                                    let chapterItems = chapters.map(function(ch) {
-                                        return { title: ch.title, status: 'pending' };
-                                    });
-                                    this.set('_urls.' + urlIdx + '.chapters', chapterItems);
+                            // Skip chapters without cached page URLs
+                            if (!chapterRec.pageUrls || chapterRec.pageUrls.length === 0) {
+                                chapterRec.downloadStatus = 'downloaded'; // nothing to download
+                                continue;
+                            }
+
+                            chapterRec.downloadStatus = 'downloading';
+                            this._refreshDisplayUrls();
+
+                            // Create a Chapter object for Engine.Storage.saveChapterPages
+                            let ChapterClass = this._ChapterClass;
+                            if (!ChapterClass) throw new Error('Chapter class not loaded');
+                            let chapter = new ChapterClass(manga, chapterRec.chapterId, chapterRec.title);
+
+                            try {
+                                // Download page images using worker pool (same as before)
+                                let maxConcurrent = this._pageConcurrency || 3;
+                                let results = [];
+                                let currentIndex = 0;
+                                let requestOptions = connector.requestOptions || {};
+
+                                async function worker() {
+                                    while (currentIndex < chapterRec.pageUrls.length) {
+                                        let pi = currentIndex++;
+                                        let response = await fetch(chapterRec.pageUrls[pi], requestOptions);
+                                        if (response.status !== 200) {
+                                            throw new Error('Page ' + chapterRec.pageUrls[pi] + ' returned status ' + response.status);
+                                        }
+                                        results[pi] = await response.blob();
+                                    }
                                 }
-                                this.set('_urls.' + urlIdx + '.chapters.' + c + '.status', 'downloading');
-                            }
 
-                            let pct = Math.round(((m * chapters.length + c) / (mangas.length * chapters.length)) * 100);
-                            this.set('_progressPercent', pct);
-                            this.set('_statusText', 'Downloading: ' + manga.title + ' - ' + chapter.title + ' (' + (m+1) + '/' + mangas.length + ' manga)');
-                            this._log('[IMPORT]   └─ Downloading: ' + chapter.title);
+                                let workers = [];
+                                for (let w = 0; w < maxConcurrent; w++) {
+                                    workers.push(worker());
+                                }
+                                await Promise.all(workers);
 
-                            // Use DownloadJob approach: getPages → save
-                            let success = await this._downloadChapter(chapter);
+                                // Save to CBZ
+                                await Engine.Storage.saveChapterPages(chapter, results);
 
-                            if (urlIdx >= 0) {
-                                this.set('_urls.' + urlIdx + '.chapters.' + c + '.status', success ? 'downloaded' : 'failed');
-                            }
-                            // Bump version to force computed property re-evaluation for chapter counts
-                            this.set('_chaptersVersion', this._chaptersVersion + 1);
-                            if (success) {
+                                chapterRec.downloadStatus = 'downloaded';
                                 this._log('[IMPORT]     ✓ ' + chapter.title + ' saved');
-                            } else {
-                                this._log('[IMPORT]     ✗ ' + chapter.title + ' failed');
+
+                            } catch (error) {
+                                this._log('[IMPORT]     ✗ ' + chapterRec.title + ' failed: ' + error.message);
+                                chapterRec.downloadStatus = 'failed';
+                                chapterRec.downloadError = error.message;
                             }
 
-                            // Save state after each chapter for crash recovery
-                            if (c % 5 === 0) { this._saveState(); }
+                            // Update progress
+                            let downloadedCount = 0;
+                            for (let i = 0; i < this._urlRecords.length; i++) {
+                                if (this._urlRecords[i].chapters) {
+                                    for (let j = 0; j < this._urlRecords[i].chapters.length; j++) {
+                                        if (this._urlRecords[i].chapters[j].downloadStatus === 'downloaded') downloadedCount++;
+                                    }
+                                }
+                            }
+                            let pct = totalChapters > 0 ? Math.round((downloadedCount / totalChapters) * 100) : 0;
+                            this.set('_progressPercent', pct);
+                            this.set('_statusText', 'Downloading: ' + meta.mangaTitle + ' - ' + chapterRec.title + ' (' + downloadedCount + '/' + totalChapters + ' chapters)');
+                            this._refreshDisplayUrls();
+
+                            // Save chapter status to IndexedDB
+                            if (this._db && c % 3 === 0) {
+                                try {
+                                    await this._db.putUrl(urlItem);
+                                } catch(e) {
+                                    self._log('[IMPORT] Chapter save error: ' + e.message);
+                                }
+                            }
 
                             if (delay > 0 && this._phase === 'downloading') {
                                 await new Promise(function(resolve) { setTimeout(resolve, delay); });
                             }
                         }
-                        this._downloadChapterIndex = 0; // Reset for next manga
+                    }
+
+                    // Final save
+                    if (this._db) {
+                        try {
+                            await this._db.putUrls(this._urlRecords);
+                        } catch(e) {
+                            self._log('[IMPORT] Final save error: ' + e.message);
+                        }
                     }
 
                     if (this._phase === 'downloading') {
-                        // Count actual results
+                        // Count results
                         let totalDownloaded = 0;
                         let totalFailed = 0;
-                        for (let i = 0; i < urls.length; i++) {
-                            if (urls[i].status === 'resolved' && urls[i].chapters) {
-                                for (let c = 0; c < urls[i].chapters.length; c++) {
-                                    if (urls[i].chapters[c].status === 'downloaded') totalDownloaded++;
-                                    if (urls[i].chapters[c].status === 'failed') totalFailed++;
+                        for (let i = 0; i < this._urlRecords.length; i++) {
+                            if (this._urlRecords[i].chapters) {
+                                for (let c = 0; c < this._urlRecords[i].chapters.length; c++) {
+                                    if (this._urlRecords[i].chapters[c].downloadStatus === 'downloaded') totalDownloaded++;
+                                    if (this._urlRecords[i].chapters[c].downloadStatus === 'failed') totalFailed++;
                                 }
                             }
                         }
@@ -966,15 +1123,15 @@
                             this.set('_phase', 'done');
                             this.set('_statusText', 'All downloads finished! (' + totalDownloaded + ' chapters)');
                             this.set('_progressPercent', 100);
-                            this._clearSavedState();
+                            await this._clearSavedState();
                         } else if (totalDownloaded > 0) {
                             this.set('_phase', 'download-paused');
-                            this.set('_statusText', 'Partial: ' + totalDownloaded + ' downloaded, ' + totalFailed + ' failed. Resume to retry.');
-                            this._saveState();
+                            this.set('_statusText', 'Partial: ' + totalDownloaded + ' downloaded, ' + totalFailed + ' failed. Resume to retry failed.');
+                            await this._saveMeta();
                         } else {
                             this.set('_phase', 'resolve-done');
-                            this.set('_statusText', 'All downloads failed. Check URLs and try again.');
-                            this._saveState();
+                            this.set('_statusText', 'All downloads failed. Check and try again.');
+                            await this._saveMeta();
                         }
                     }
                 } catch (error) {
@@ -983,67 +1140,15 @@
                     this.set('_phase', 'download-paused');
                 } finally {
                     this._processing = false;
-                    this._saveState();
                 }
             }
+
+            // ---- Phase 2 Pruned: Chapter download via Engine.Storage ----
+            // (uses Engine.Storage.saveChapterPages, requires a Chapter-compatible object)
 
             /**
-             * Download a single chapter's pages using a worker pool pattern.
-             * At most _pageConcurrency page fetches are in-flight at any time.
-             * chapter.getPages() → fetch blobs → Engine.Storage.saveChapterPages()
+             * Minimal Chapter shim for passing to Engine.Storage.saveChapterPages().
              */
-            async _downloadChapter(chapter) {
-                try {
-                    let pages = await new Promise(function(resolve, reject) {
-                        chapter.getPages(function(error, data) {
-                            if (error) reject(error);
-                            else resolve(data);
-                        });
-                    });
-
-                    if (!pages || (pages instanceof Array && pages.length === 0)) {
-                        throw new Error('No pages found');
-                    }
-
-                    // Handle manga pages (array of URLs)
-                    if (pages instanceof Array) {
-                        let maxConcurrent = this._pageConcurrency || 3;
-                        let results = [];
-                        let currentIndex = 0;
-                        let self = this;
-                        let requestOptions = chapter.manga.connector.requestOptions || {};
-
-                        async function worker() {
-                            while (currentIndex < pages.length) {
-                                let i = currentIndex++;
-                                // NOTE: Per-page IPC logging removed for performance
-                                // (thousands of IPC.send() calls per chapter overwhelm the Electron bridge)
-                                let response = await fetch(pages[i], requestOptions);
-                                if (response.status !== 200) {
-                                    throw new Error('Page ' + pages[i] + ' returned status ' + response.status);
-                                }
-                                results[i] = await response.blob();
-                            }
-                        }
-
-                        let workers = [];
-                        for (let w = 0; w < maxConcurrent; w++) {
-                            workers.push(worker());
-                        }
-                        await Promise.all(workers);
-
-                        await Engine.Storage.saveChapterPages(chapter, results);
-                        return true;
-                    }
-
-                    // Handle anime playlists/streams (not supported in importer)
-                    this._log('[IMPORT] Skipping non-image chapter: ' + chapter.title);
-                    return false;
-                } catch (error) {
-                    this._log('[IMPORT] Download failed: ' + error.message);
-                    return false;
-                }
-            }
         }
         window.customElements.define(HakunekoImportQueue.is, HakunekoImportQueue);
     </script>
