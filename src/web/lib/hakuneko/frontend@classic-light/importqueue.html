@@ -613,7 +613,7 @@
             }
 
             _onStartClick() {
-                this._log('[IMPORT] ▶ Resolve & Pre-fetch clicked');
+                this._log('[IMPORT] -> Resolve & Pre-fetch clicked');
                 if (this._processing) return;
                 this.set('_phase', 'resolving');
                 this.set('_expandedUrl', null);
@@ -621,7 +621,7 @@
             }
 
             _onResumeClick() {
-                this._log('[IMPORT] ⟳ Resume resolving clicked');
+                this._log('[IMPORT] -> Resume resolving clicked');
                 if (this._processing) return;
                 this.set('_phase', 'resolving');
                 this.set('_expandedUrl', null);
@@ -629,7 +629,7 @@
             }
 
             _onDownloadStartClick() {
-                this._log('[IMPORT] ▶ Start Downloads clicked');
+                this._log('[IMPORT] -> Start Downloads clicked');
                 if (this._processing) return;
                 this.set('_phase', 'downloading');
                 this._downloadMangaIndex = 0;
@@ -638,7 +638,7 @@
             }
 
             _onDownloadResumeClick() {
-                this._log('[IMPORT] ⟳ Resume Downloads clicked');
+                this._log('[IMPORT] -> Resume Downloads clicked');
                 if (this._processing) return;
                 this.set('_phase', 'downloading');
                 // No need to reset to chapter 0 - we track per-chapter status precisely in IndexedDB
@@ -651,7 +651,7 @@
             }
 
             async _pauseQueue() {
-                this._log('[IMPORT] ⏸ Pausing...');
+                this._log('[IMPORT] PAUSING...');
                 let pausedPhase = this._phase === 'resolving' ? 'resolve-paused' : 'download-paused';
                 this.set('_phase', pausedPhase);
                 this.set('_statusText', 'Paused (saving state...)');
@@ -660,7 +660,7 @@
             }
 
             async _onResetClick() {
-                this._log('[IMPORT] 🔄 Reset clicked');
+                this._log('[IMPORT] Reset clicked');
                 if (this._isRunning) {
                     if (!confirm('Reset will stop the current import. Are you sure?')) return;
                 }
@@ -813,6 +813,10 @@
                         let pct = Math.round(((resolved + failed) / this._urlRecords.length) * 100);
                         this.set('_progressPercent', pct);
                         this.set('_statusText', 'Pre-fetched ' + resolved + '/' + this._urlRecords.length + ' (' + pct + '%), ' + failed + ' failed');
+                        // Terminal log each batch so user sees real-time progress
+                        if (batchCount % 3 === 1) { // log every 3rd batch to avoid flood
+                            this._log('[IMPORT] PROGRESS: ' + resolved + '/' + this._urlRecords.length + ' resolved (' + pct + '%), ' + failed + ' failed');
+                        }
 
                         // Periodic save to IndexedDB
                         if (batchCount % 3 === 0 && this._db) {
@@ -846,7 +850,7 @@
                             if (this._urlRecords[i].resolveStatus === 'resolved') resolved++;
                             else if (this._urlRecords[i].resolveStatus === 'failed') failed++;
                         }
-                        this._log('[IMPORT] ✓ Pre-fetch done: ' + resolved + ' OK, ' + failed + ' failed');
+                        this._log('[IMPORT] Pre-fetch done: ' + resolved + ' OK, ' + failed + ' failed');
                         this.set('_phase', 'resolve-done');
                         this.set('_statusText', resolved + ' pre-fetched, ' + failed + ' failed. Ready to download.');
                         this.set('_progressPercent', 100);
@@ -948,6 +952,9 @@
                     urlItem.chapters = chapterRecords;
                     urlItem.resolveStatus = 'resolved';
 
+                    // Log success with manga title and chapter count
+                    this._log('[IMPORT] OK ' + urlItem.mangaMeta.mangaTitle + ' (' + chapterRecords.length + ' chapters, ' + chapterRecords.filter(function(c) { return c.downloadStatus === 'pages-ready'; }).length + ' with page URLs)');
+
                     // Save this record to IndexedDB immediately for crash safety
                     if (this._db) {
                         try {
@@ -958,7 +965,7 @@
                     }
 
                 } catch (error) {
-                    this._log('[IMPORT] ✗ ' + url + ' → ' + error.message);
+                    this._log('[IMPORT] FAIL ' + url + ' -> ' + error.message);
                     urlItem.resolveStatus = 'failed';
                     urlItem.resolveError = error.message;
                 }
@@ -998,7 +1005,7 @@
                         let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
 
                         if (!urlItem.chapters || urlItem.chapters.length === 0) {
-                            this._log('[IMPORT]   └─ No chapters for ' + meta.mangaTitle);
+                            this._log('[IMPORT]   -> No chapters for ' + meta.mangaTitle);
                             continue;
                         }
 
@@ -1060,10 +1067,10 @@
                                 await Engine.Storage.saveChapterPages(chapter, results);
 
                                 chapterRec.downloadStatus = 'downloaded';
-                                this._log('[IMPORT]     ✓ ' + chapter.title + ' saved');
+                                this._log('[IMPORT]     OK ' + chapter.title + ' saved');
 
                             } catch (error) {
-                                this._log('[IMPORT]     ✗ ' + chapterRec.title + ' failed: ' + error.message);
+                                this._log('[IMPORT]     FAIL ' + chapterRec.title + ' failed: ' + error.message);
                                 chapterRec.downloadStatus = 'failed';
                                 chapterRec.downloadError = error.message;
                             }
@@ -1118,7 +1125,7 @@
                                 }
                             }
                         }
-                        this._log('[IMPORT] ✓ Downloads finished: ' + totalDownloaded + ' OK, ' + totalFailed + ' failed');
+                        this._log('[IMPORT] Downloads finished: ' + totalDownloaded + ' OK, ' + totalFailed + ' failed');
                         if (totalFailed === 0 && totalDownloaded > 0) {
                             this.set('_phase', 'done');
                             this.set('_statusText', 'All downloads finished! (' + totalDownloaded + ' chapters)');
