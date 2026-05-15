@@ -795,14 +795,32 @@
                             self._urlRecords[idx].resolveStatus = 'resolving';
                         });
 
-                        // Process all URLs in the batch concurrently
-                        let promises = batch.map(function(idx) {
-                            return self._resolveAndPrefetch(idx);
+                        // Process all URLs in the batch concurrently with a per-URL timeout
+                        const URL_TIMEOUT = 120000; // 2 minutes max per URL
+                        let settled = await Promise.allSettled(batch.map(function(idx) {
+                            return Promise.race([
+                                self._resolveAndPrefetch(idx),
+                                new Promise(function(_, reject) { setTimeout(function() { reject(new Error('URL resolution timed out after 120s')); }, URL_TIMEOUT); })
+                            ]);
+                        }));
+
+                        // Log any timeouts/failures at the batch level
+                        settled.forEach(function(result, i) {
+                            if (result.status === 'rejected') {
+                                let idx = batch[i];
+                                if (self._urlRecords[idx] && self._urlRecords[idx].resolveStatus !== 'resolved' && self._urlRecords[idx].resolveStatus !== 'failed') {
+                                    self._urlRecords[idx].resolveStatus = 'failed';
+                                    self._urlRecords[idx].resolveError = result.reason.message;
+                                    self._log('[IMPORT] FAIL (timeout) ' + self._urlRecords[idx].url + ' -> ' + result.reason.message);
+                                }
+                            }
                         });
-                        await Promise.all(promises);
 
                         this._processedIndex += batch.length;
                         this._refreshDisplayUrls();
+
+                        // Yield to the rendering engine so the UI doesn't go white
+                        await new Promise(function(resolve) { setTimeout(resolve, 0); });
 
                         // Update progress
                         let resolved = 0, failed = 0;
