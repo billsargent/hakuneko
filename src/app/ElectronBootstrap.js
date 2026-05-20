@@ -383,7 +383,7 @@ module.exports = class ElectronBootstrap {
                     requestHeaders: result.requestHeaders
                 });
             } catch(error) {
-                this._logger.warn(error);
+                this._logger.debug(error);
                 callback({
                     cancel: false,
                     requestHeaders: details.requestHeaders
@@ -402,7 +402,7 @@ module.exports = class ElectronBootstrap {
                     // statusLine
                 });
             } catch(error) {
-                this._logger.warn(error);
+                this._logger.debug(error);
                 callback({
                     cancel: false,
                     responseHeaders: details.responseHeaders

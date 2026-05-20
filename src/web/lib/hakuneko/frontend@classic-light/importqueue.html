@@ -209,6 +209,9 @@
                 <template is="dom-if" if="[[ _showImportButton ]]">
                     <button class="button" on-click="openFilePicker">📂 Import File</button>
                 </template>
+                <template is="dom-if" if="[[ _showRetryFailed ]]">
+                    <button class="button primary" on-click="_onRetryFailedClick" disabled$="[[ _processing ]]">⟳ Retry Failed</button>
+                </template>
 
                 <label>Concurrency:
                     <select value="{{ _concurrency::change }}">
@@ -241,6 +244,20 @@
                         <option value="5">5</option>
                         <option value="10">10</option>
                         <option value="20">20</option>
+                    </select>
+                </label>
+
+                <label>Timeout:
+                    <select value="{{ _urlTimeout::change }}">
+                        <option value="60000">1m</option>
+                        <option value="120000">2m</option>
+                        <option value="300000">5m</option>
+                        <option value="600000" selected>10m</option>
+                        <option value="1200000">20m</option>
+                        <option value="1800000">30m</option>
+                        <option value="2400000">40m</option>
+                        <option value="3000000">50m</option>
+                        <option value="3600000">60m</option>
                     </select>
                 </label>
 
@@ -313,6 +330,7 @@
                     _showDownloadStart: { type: Boolean, computed: '_computeShowDownloadStart(_phase, _processing)' },
                     _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase, _processing)' },
                     _showImportButton: { type: Boolean, computed: '_computeShowImportButton(_phase, _processing)' },
+                    _showRetryFailed: { type: Boolean, computed: '_computeShowRetryFailed(_phase, _processing, _totalUrlCount)' },
                     _showEmptyMessage: { type: Boolean, computed: '_computeEmptyMessage(_totalUrlCount, _visible)' },
                     _phaseLabel: { type: String, computed: '_computePhaseLabel(_phase)' },
                     _phaseClass: { type: String, computed: '_computePhaseClass(_phase)' },
@@ -321,6 +339,7 @@
                     _concurrency: { type: Number, value: 5 },
                     _batchDelay: { type: Number, value: 500 },
                     _pageConcurrency: { type: Number, value: 10 },
+                    _urlTimeout: { type: Number, value: 600000 },
                     _progressPercent: { type: Number, value: 0 },
                     _statusText: { type: String, value: 'Ready' },
                     _totalUrlCount: { type: Number, value: 0 },
@@ -339,6 +358,10 @@
                 // Cache for page URLs, keyed by 'url::chapterId'.
                 // Kept outside Polymer's observable system to avoid IPC serialization bloat.
                 this._pageUrlCache = new Map();
+                // Track active AbortControllers for in-flight fetch() calls during download phase
+                this._abortControllers = [];
+                // Throttle for _refreshDisplayUrls to prevent Polymer re-render storms
+                this._lastRefreshTime = 0;
             }
 
             async ready() {
@@ -404,6 +427,7 @@
             _computeShowDownloadStart(phase, processing) { return phase === 'resolve-done' && !processing; }
             _computeShowDownloadResume(phase, processing) { return phase === 'download-paused' && !processing; }
             _computeShowImportButton(phase, processing) { return phase === 'idle' || phase === 'resolve-done'; }
+            _computeShowRetryFailed(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
             _computeEmptyMessage(urlCount, visible) { return visible && urlCount === 0; }
 
             _computePhaseLabel(phase) {
@@ -439,7 +463,12 @@
 
             // ---- Terminal Logging ----
             _log(message) {
-                try { this.ipc.send('import-log', message); }
+                try {
+                    let ts = new Date();
+                    let datestr = ts.toLocaleDateString('en-CA'); // 2026-05-17
+                    let timestr = ts.toLocaleTimeString('en-US', { hour12: true }); // 7:45:02 PM
+                    this.ipc.send('import-log', '[' + datestr + ' ' + timestr + '] ' + message);
+                }
                 catch(e) { console.log(message); }
             }
 
@@ -503,7 +532,7 @@
             _refreshDisplayUrls() {
                 // Only push a small window of records into Polymer for display
                 // Strip heavy pageUrls arrays before Polymer data binding to avoid IPC size limit
-                let slice = this._urlRecords.slice(0, 500);
+                let slice = this._urlRecords.slice(0, 200);
                 let displaySlice = slice.map(function(record) {
                     let display = {
                         url: record.url,
@@ -544,33 +573,41 @@
 
             /**
              * Reattach page URLs from the cache onto chapter records before saving to IndexedDB.
-             * The caller must call _detachPageUrlsAfterSave() afterward to keep them out of Polymer scope.
+             * With pageUrls now kept on records at all times, this is effectively a no-op
+             * but kept for defensive compatibility.
              */
             _reattachPageUrlsForSave(record) {
-                if (record.chapters) {
-                    for (let c = 0; c < record.chapters.length; c++) {
-                        let ch = record.chapters[c];
-                        let key = record.url + '::' + ch.chapterId;
-                        if (this._pageUrlCache.has(key)) {
-                            ch.pageUrls = this._pageUrlCache.get(key);
-                        }
-                    }
-                }
+                // pageUrls are always present on chapter records now (not nulled),
+                // so no reattachment is needed. This method is kept as a defensive
+                // compatibility shim for any code paths that may still call it.
             }
 
             /**
-             * Null out page URLs on chapter records after saving to IndexedDB,
-             * keeping them out of Polymer's observable scope.
+             * Detach page URLs from chapter records after saving to IndexedDB.
+             * Now a no-op since pageUrls are kept on records as a fallback for
+             * _trimPageUrlCache() evictions.
              */
             _detachPageUrlsAfterSave(record) {
-                if (record.chapters) {
-                    for (let c = 0; c < record.chapters.length; c++) {
-                        let ch = record.chapters[c];
-                        let key = record.url + '::' + ch.chapterId;
-                        if (ch.pageUrls && this._pageUrlCache.has(key)) {
-                            ch.pageUrls = null;
-                        }
+                // pageUrls are intentionally kept on records now so that chapter
+                // downloads still work when entries are evicted from _pageUrlCache.
+                // No detachment is performed.
+            }
+
+            /**
+             * Trim the page URL cache to ~5000 entries to prevent unbounded memory growth.
+             * Removes the oldest entries when the cache exceeds the limit.
+             */
+            _trimPageUrlCache() {
+                const MAX_CACHE_SIZE = 5000;
+                if (this._pageUrlCache.size > MAX_CACHE_SIZE) {
+                    // Delete oldest entries (Map iterates in insertion order)
+                    let toDelete = this._pageUrlCache.size - MAX_CACHE_SIZE;
+                    // Can't delete while iterating with for...of, so collect keys first
+                    let keys = this._pageUrlCache.keys();
+                    for (let i = 0; i < toDelete; i++) {
+                        this._pageUrlCache.delete(keys.next().value);
                     }
+                    this._log('[IMPORT] Trimmed page URL cache from ' + (this._pageUrlCache.size + toDelete) + ' to ' + this._pageUrlCache.size);
                 }
             }
 
@@ -594,26 +631,100 @@
                 try {
                     // Use cursor-based loading to avoid "Maximum IPC message size exceeded"
                     // when IndexedDB transfers records from the storage layer to the renderer.
-                    // We strip pageUrls from each record immediately as it arrives,
-                    // caching them in the non-observable Map before they can trigger IPC.
+                    // We cache pageUrls in a non-observable Map for faster lookup, but keep
+                    // them on the records as well so that _trimPageUrlCache() evictions don't
+                    // cause chapters to be silently skipped during download phase.
                     this._pageUrlCache = new Map();
                     this._urlRecords = [];
                     let urlCount = 0;
+                    let repairedChapters = 0;
                     await this._db.getAllUrlsCursor(function(record) {
-                        // Cache pageUrls in the Map and null them on the record
-                        // before it enters any Polymer-observable data structure
+                        // Cache pageUrls in the Map for faster access, but keep them on
+                        // the records as a fallback when entries are evicted from the cache.
                         if (record.chapters) {
                             for (let ci = 0; ci < record.chapters.length; ci++) {
                                 let ch = record.chapters[ci];
                                 if (ch.pageUrls && ch.pageUrls.length > 0) {
                                     this._pageUrlCache.set(record.url + '::' + ch.chapterId, ch.pageUrls);
-                                    ch.pageUrls = null;
+                                }
+                                // REPAIR: The old bug nulled pageUrls from records but marked chapters as
+                                // 'downloaded' or 'pages-ready'. When we load from IndexedDB, chapters with
+                                // missing pageUrls are corrupted — they were never actually fetched/downloaded.
+                                // This catches ALL corrupted chapters regardless of current downloadStatus:
+                                //   - 'downloaded'/'pages-ready' with no pageUrls (original bug)
+                                //   - 'pending' with no pageUrls (after previous repair rounds)
+                                //   - 'failed' with no pageUrls (previous repair saved them as failed)
+                                // After repair, the resolve phase reset to 'idle' triggers the fast-path
+                                // in _resolveAndPrefetch() to re-fetch page URLs. Chapters that legitimately
+                                // fail (e.g. video content) will fail again in the fast-path — that's fine.
+                                if (!ch.pageUrls || ch.pageUrls.length === 0) {
+                                    ch.downloadStatus = 'pending';
+                                    ch.downloadError = null;
+                                    repairedChapters++;
                                 }
                             }
                         }
                         this._urlRecords.push(record);
                         urlCount++;
                     }.bind(this));
+
+                    // === DIAGNOSTIC: Dump database statistics to understand why repair isn't triggering ===
+                    {
+                        let totalChapters = 0;
+                        let noPageUrls = 0;
+                        let withPageUrls = 0;
+                        let statusCounts = {};
+                        let sampleRecord = null;
+                        let sampleChapter = null;
+                        for (let ri = 0; ri < this._urlRecords.length; ri++) {
+                            let rec = this._urlRecords[ri];
+                            if (rec.chapters) {
+                                for (let ci = 0; ci < rec.chapters.length; ci++) {
+                                    let ch = rec.chapters[ci];
+                                    totalChapters++;
+                                    let hasPageUrls = ch.pageUrls && ch.pageUrls.length > 0;
+                                    if (hasPageUrls) withPageUrls++;
+                                    else noPageUrls++;
+                                    let status = ch.downloadStatus || 'undefined';
+                                    statusCounts[status] = (statusCounts[status] || 0) + 1;
+                                    if (sampleChapter === null) {
+                                        sampleChapter = {
+                                            chapterId: ch.chapterId,
+                                            title: ch.title,
+                                            downloadStatus: ch.downloadStatus,
+                                            pageUrlsType: typeof ch.pageUrls,
+                                            pageUrlsLength: ch.pageUrls ? ch.pageUrls.length : 'N/A',
+                                            pageUrlsSample: ch.pageUrls ? ch.pageUrls.slice(0, 3) : null,
+                                            downloadError: ch.downloadError
+                                        };
+                                    }
+                                }
+                            }
+                            if (sampleRecord === null && rec.chapters && rec.chapters.length > 0) {
+                                sampleRecord = {
+                                    url: rec.url,
+                                    resolveStatus: rec.resolveStatus,
+                                    chapterCount: rec.chapters ? rec.chapters.length : 0
+                                };
+                            }
+                        }
+                        self._log('[IMPORT-DIAG] URL records: ' + this._urlRecords.length + ', Total chapters: ' + totalChapters);
+                        self._log('[IMPORT-DIAG] Chapters with pageUrls: ' + withPageUrls + ', without: ' + noPageUrls);
+                        self._log('[IMPORT-DIAG] Chapter status breakdown: ' + JSON.stringify(statusCounts));
+                        self._log('[IMPORT-DIAG] Sample record: ' + JSON.stringify(sampleRecord));
+                        self._log('[IMPORT-DIAG] Sample chapter: ' + JSON.stringify(sampleChapter));
+                        self._log('[IMPORT-DIAG] repairedChapters: ' + repairedChapters);
+                    }
+
+                    if (repairedChapters > 0) {
+                        self._log('[IMPORT] REPAIRED ' + repairedChapters + ' chapters that had missing page URLs (data corruption from previous buggy version)');
+                        // Persist the repair to IndexedDB immediately
+                        try {
+                            await this._db.putUrls(this._urlRecords);
+                        } catch(e) {
+                            self._log('[IMPORT] Failed to persist repair: ' + e.message);
+                        }
+                    }
 
                     if (urlCount === 0) {
                         self._log('[IMPORT] No saved queue state found');
@@ -624,12 +735,26 @@
                     let concurrency = await this._db.getMeta('concurrency');
                     let batchDelay = await this._db.getMeta('batchDelay');
                     let pageConcurrency = await this._db.getMeta('pageConcurrency');
+                    let urlTimeout = await this._db.getMeta('urlTimeout');
 
                     self._log('[IMPORT] Found saved queue: phase=' + phase + ', ' + urlCount + ' URLs');
                     self._log('[IMPORT] Cached ' + this._pageUrlCache.size + ' chapter page-URL sets in JS Map (out of Polymer scope)');
 
                     // Normalize active phases to paused equivalents
                     let restorePhase = phase || 'resolve-paused';
+                    // If chapters were repaired, reset the phase from 'resolve-done' to 'idle'
+                    // so the user sees the "Resolve & Pre-fetch" button (fast-path will skip
+                    // already-fetched chapters and only re-fetch missing page URLs).
+                    if (repairedChapters > 0 && restorePhase === 'resolve-done') {
+                        self._log('[IMPORT] Repair detected ' + repairedChapters + ' corrupted chapters — resetting phase to idle for re-resolution');
+                        restorePhase = 'idle';
+                        // Reset all URL records' resolveStatus to 'pending' so _processUrls()
+                        // will iterate over them and trigger the fast-path in _resolveAndPrefetch()
+                        // to re-fetch missing page URLs for chapters that were repaired.
+                        for (let ri = 0; ri < this._urlRecords.length; ri++) {
+                            this._urlRecords[ri].resolveStatus = 'pending';
+                        }
+                    }
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
 
@@ -640,6 +765,7 @@
                     if (concurrency) this.set('_concurrency', concurrency);
                     if (batchDelay) this.set('_batchDelay', batchDelay);
                     if (pageConcurrency) this.set('_pageConcurrency', pageConcurrency);
+                    if (urlTimeout) this.set('_urlTimeout', urlTimeout);
 
                     // Calculate progress for display
                     let resolved = 0, failed = 0;
@@ -682,6 +808,7 @@
                     await this._db.putMeta('concurrency', this._concurrency);
                     await this._db.putMeta('batchDelay', this._batchDelay);
                     await this._db.putMeta('pageConcurrency', this._pageConcurrency);
+                    await this._db.putMeta('urlTimeout', this._urlTimeout);
                 } catch(e) {
                     this._log('[IMPORT] Meta save failed: ' + e.message);
                 }
@@ -703,8 +830,12 @@
                 this._log('[IMPORT] Close button clicked');
                 if (this._isRunning) {
                     if (!confirm('Import is in progress. Pause and close?')) return;
-                    this._pauseQueue();
                 }
+                // Abort all in-flight download requests immediately before closing
+                // to prevent orphaned fetch() calls from triggering "not yet ready" IPC errors
+                this._abortControllers.forEach(function(c) { c.abort(); });
+                this._abortControllers = [];
+                this._pauseQueue();
                 this.set('_visible', false);
                 this.set('_expandedUrl', null);
             }
@@ -738,7 +869,9 @@
                 this._log('[IMPORT] -> Resume Downloads clicked');
                 if (this._processing) return;
                 this.set('_phase', 'downloading');
-                // No need to reset to chapter 0 - we track per-chapter status precisely in IndexedDB
+                // Reset manga index so worker pool re-scans from the beginning;
+                // per-chapter downloadStatus checks will skip already-completed work.
+                this._downloadMangaIndex = 0;
                 this.set('_expandedUrl', null);
                 this._processDownloads();
             }
@@ -749,6 +882,11 @@
 
             async _pauseQueue() {
                 this._log('[IMPORT] PAUSING...');
+                // Abort all in-flight download requests immediately
+                // This causes the worker pool's fetch() calls to throw AbortError,
+                // which will mark the current chapter as failed (can be retried later)
+                this._abortControllers.forEach(function(c) { c.abort(); });
+                this._abortControllers = [];
                 let pausedPhase = this._phase === 'resolving' ? 'resolve-paused' : 'download-paused';
                 this.set('_phase', pausedPhase);
                 this.set('_statusText', 'Paused (saving state...)');
@@ -761,6 +899,9 @@
                 if (this._isRunning) {
                     if (!confirm('Reset will stop the current import. Are you sure?')) return;
                 }
+                // Abort any in-flight download requests
+                this._abortControllers.forEach(function(c) { c.abort(); });
+                this._abortControllers = [];
                 this._urlRecords = [];
                 this._processedIndex = 0;
                 this._downloadMangaIndex = 0;
@@ -774,6 +915,31 @@
                 await this._clearSavedState();
             }
 
+
+            async _onRetryFailedClick() {
+                this._log('[IMPORT] -> Retry Failed clicked');
+                if (this._processing) return;
+                // Find all failed URL records and reset them
+                let retryCount = 0;
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].resolveStatus === 'failed') {
+                        this._urlRecords[i].resolveStatus = 'pending';
+                        this._urlRecords[i].resolveError = null;
+                        retryCount++;
+                    }
+                }
+                if (retryCount === 0) {
+                    this._log('[IMPORT] No failed URLs to retry');
+                    return;
+                }
+                this._log('[IMPORT] Retrying ' + retryCount + ' failed URLs');
+                this._processedIndex = 0;
+                this._refreshDisplayUrls();
+                this.set('_statusText', 'Retrying ' + retryCount + ' failed URLs...');
+                this.set('_phase', 'resolving');
+                this.set('_expandedUrl', null);
+                this._processUrls();
+            }
 
             // ---- File Picker ----
 
@@ -940,11 +1106,12 @@
                         });
 
                         // Process all URLs in the batch concurrently with a per-URL timeout
-                        const URL_TIMEOUT = 120000; // 2 minutes max per URL
+                        let urlTimeout = this._urlTimeout;
+                        let timeoutMinutes = Math.round(urlTimeout / 60000);
                         let settled = await Promise.allSettled(batch.map(function(idx) {
                             return Promise.race([
                                 self._resolveAndPrefetch(idx),
-                                new Promise(function(_, reject) { setTimeout(function() { reject(new Error('URL resolution timed out after 120s')); }, URL_TIMEOUT); })
+                                new Promise(function(_, reject) { setTimeout(function() { reject(new Error('URL resolution timed out after ' + timeoutMinutes + 'm')); }, urlTimeout); })
                             ]);
                         }));
 
@@ -980,8 +1147,11 @@
                             this._log('[IMPORT] PROGRESS: ' + resolved + '/' + this._urlRecords.length + ' resolved (' + pct + '%), ' + failed + ' failed');
                         }
 
-                        // Periodic save to IndexedDB (save everything, including newly failed)
-                        if (batchCount % 3 === 0 && this._db) {
+                        // Save each completed batch of urls to IndexedDB immediately.
+                        // Per-URL saves in _resolveAndPrefetch were removed to reduce IPC
+                        // contention with onBeforeSendHeaders, but we still persist each
+                        // batch so completed work is crash-safe.
+                        if (this._db) {
                             try {
                                 let batchRecs = batch.map(function(idx) { return self._urlRecords[idx]; });
                                 // Reattach pageUrls from cache before saving
@@ -998,6 +1168,9 @@
                             }
                         }
 
+
+                        // Trim the page URL cache to prevent unbounded memory growth
+                        this._trimPageUrlCache();
 
                         if (delay > 0 && this._phase === 'resolving') {
                             await new Promise(function(resolve) { setTimeout(resolve, delay); });
@@ -1048,9 +1221,121 @@
              * Everything is stored in the internal _urlRecords array.
              */
             async _resolveAndPrefetch(index) {
+                let self = this;
                 let urlItem = this._urlRecords[index];
+
                 let url = urlItem.url;
                 try {
+                    // ---- FAST PATH: Skip expensive manga/chapter resolution if already resolved ----
+                    // If mangaMeta and chapters already exist, we only need to re-fetch
+                    // page URLs for chapters that are missing them. This avoids days of
+                    // re-resolution after fixing corrupted IndexedDB data.
+                    if (urlItem.mangaMeta && urlItem.chapters && urlItem.chapters.length > 0) {
+                        let missingPageUrls = 0;
+                        for (let fc = 0; fc < urlItem.chapters.length; fc++) {
+                            let ch = urlItem.chapters[fc];
+                            // Skip chapters that already have page URLs or are already done/failed
+                            if (ch.pageUrls && ch.pageUrls.length > 0) continue;
+                            if (ch.downloadStatus === 'downloaded') continue;
+                            missingPageUrls++;
+                        }
+
+                        if (missingPageUrls === 0) {
+                            // All chapters already have pageUrls — nothing to do
+                            // BUT still ensure resolveStatus is 'resolved' so Phase 2 can proceed
+                            urlItem.resolveStatus = 'resolved';
+                            this._log('[IMPORT] FAST-PATH (skip): ' + urlItem.mangaMeta.mangaTitle + ' — all ' + urlItem.chapters.length + ' chapters already have page URLs cached');
+                            return;
+                        }
+
+                        this._log('[IMPORT] FAST-PATH: ' + urlItem.mangaMeta.mangaTitle + ' — re-fetching page URLs for ' + missingPageUrls + '/' + urlItem.chapters.length + ' chapters');
+
+                        // Find the connector from Engine by the stored connectorId
+                        let connector = Engine.Connectors.find(function(c) { return c.id === urlItem.mangaMeta.connectorId; });
+                        if (!connector) {
+                            throw new Error('Fast-path: connector ' + urlItem.mangaMeta.connectorId + ' not found for ' + urlItem.url);
+                        }
+
+                        // Create Manga and Chapter objects using the already-known metadata
+                        let Manga = this._MangaClass;
+                        if (!Manga) throw new Error('Manga class not loaded');
+                        let manga = new Manga(connector, urlItem.mangaMeta.mangaId, urlItem.mangaMeta.mangaTitle);
+
+                        let ChapterClass = this._ChapterClass;
+                        if (!ChapterClass) throw new Error('Chapter class not loaded');
+
+                        // Use controlled concurrency for chapter page-fetches within each manga
+                        // to avoid sequentially waiting for each chapter's getPages().
+                        let pageConcurrency = this._pageConcurrency || 5;
+                        let chapterFetchIndex = 0;
+
+                        async function fetchChapterPages() {
+                            while (chapterFetchIndex < urlItem.chapters.length) {
+                                let ci;
+                                // Atomically grab the next unprocessed chapter index
+                                ci = chapterFetchIndex++;
+                                if (ci >= urlItem.chapters.length) break;
+
+                                let chapterRec = urlItem.chapters[ci];
+
+                                // Skip chapters that already have page URLs cached
+                                if (chapterRec.pageUrls && chapterRec.pageUrls.length > 0) continue;
+                                // Skip already-downloaded chapters
+                                if (chapterRec.downloadStatus === 'downloaded') continue;
+
+                                try {
+                                    let chapter = new ChapterClass(manga, chapterRec.chapterId, chapterRec.title);
+                                    let pages = await new Promise(function(resolve, reject) {
+                                        chapter.getPages(function(error, data) {
+                                            if (error) reject(error);
+                                            else resolve(data);
+                                        });
+                                    });
+
+                                    // Phase check: bail if paused during fast-path (flag for all workers)
+                                    if (self._phase !== 'resolving') {
+                                        chapterRec.downloadStatus = 'failed';
+                                        chapterRec.downloadError = 'Paused during page pre-fetch (fast-path)';
+                                        // Signal other workers to stop by advancing index past end
+                                        chapterFetchIndex = urlItem.chapters.length;
+                                        break;
+                                    }
+
+                                    if (pages instanceof Array) {
+                                        chapterRec.pageUrls = pages;
+                                        chapterRec.downloadStatus = 'pages-ready';
+                                    } else {
+                                        chapterRec.downloadStatus = 'failed';
+                                        chapterRec.downloadError = 'Non-image content (video/stream)';
+                                    }
+                                } catch(e) {
+                                    chapterRec.downloadStatus = 'failed';
+                                    chapterRec.downloadError = e.message;
+                                }
+
+                                // Cache page URLs if we got them
+                                if (chapterRec.pageUrls && chapterRec.pageUrls.length > 0) {
+                                    self._pageUrlCache.set(urlItem.url + '::' + chapterRec.chapterId, chapterRec.pageUrls);
+                                }
+                            }
+                        }
+
+                        // Launch worker pool for concurrent chapter page-fetching
+                        let workers = [];
+                        for (let w = 0; w < pageConcurrency; w++) {
+                            workers.push(fetchChapterPages());
+                        }
+                        await Promise.all(workers);
+                        // Trim the page URL cache after processing a manga's chapters
+                        self._trimPageUrlCache();
+                        // Log each manga's result
+                        self._log('[IMPORT] DONE (fast-path) ' + urlItem.mangaMeta.mangaTitle + ' (' + urlItem.chapters.length + ' chapters)');
+                        urlItem.resolveStatus = 'resolved';
+                        return;
+
+                    }
+
+                    // ---- FULL RESOLUTION PATH (for new/not-yet-resolved manga) ----
                     let uri = new URL(url);
                     let connectors = Engine.Connectors.filter(function(c) { return c.canHandleURI && c.canHandleURI(uri); });
                     if (!connectors.length) {
@@ -1065,6 +1350,9 @@
 
                     let connector = connectors[0];
                     let manga = await connector.getMangaFromURI(uri);
+
+                    // Phase check: bail if paused after getMangaFromURI
+                    if (this._phase !== 'resolving') throw new Error('Paused during resolution');
 
                     // Store manga metadata
                     urlItem.mangaMeta = {
@@ -1084,6 +1372,9 @@
                             if (error) reject(error); else resolve(chs);
                         });
                     });
+
+                    // Phase check: bail if paused after getChapters
+                    if (this._phase !== 'resolving') throw new Error('Paused after fetching chapters');
 
                     if (!chapters || chapters.length === 0) {
                         urlItem.resolveStatus = 'resolved';
@@ -1112,6 +1403,15 @@
                                 });
                             });
 
+                            // Phase check: bail if paused after each getPages
+                            if (this._phase !== 'resolving') {
+                                record.downloadStatus = 'failed';
+                                record.downloadError = 'Paused during page pre-fetch';
+                                chapterRecords.push(record);
+                                // Don't process remaining chapters, break out of the loop
+                                break;
+                            }
+
                             if (pages instanceof Array) {
                                 record.pageUrls = pages;
                                 record.downloadStatus = 'pages-ready'; // page URLs cached, ready to download images
@@ -1131,31 +1431,23 @@
                     urlItem.chapters = chapterRecords;
                     urlItem.resolveStatus = 'resolved';
 
-                    // Cache pageUrls in the non-observable Map and null them on the record
-                    // to keep them out of Polymer's IPC serialization scope
+                    // Cache pageUrls in the non-observable Map for faster access during downloads.
+                    // pageUrls are kept on the chapter records as a fallback so that chapter downloads
+                    // still work even if entries are evicted from the cache by _trimPageUrlCache().
                     for (let ci = 0; ci < chapterRecords.length; ci++) {
                         let ch = chapterRecords[ci];
                         if (ch.pageUrls && ch.pageUrls.length > 0) {
                             this._pageUrlCache.set(urlItem.url + '::' + ch.chapterId, ch.pageUrls);
-                            ch.pageUrls = null;
                         }
                     }
 
                     // Log success with manga title and chapter count
                     this._log('[IMPORT] OK ' + urlItem.mangaMeta.mangaTitle + ' (' + chapterRecords.length + ' chapters, ' + chapterRecords.filter(function(c) { return c.downloadStatus === 'pages-ready'; }).length + ' with page URLs)');
 
-                    // Save this record to IndexedDB immediately for crash safety
-                    // Reattach pageUrls from cache for the save, then detach again
-                    if (this._db) {
-                        try {
-                            this._reattachPageUrlsForSave(urlItem);
-                            await this._db.putUrl(urlItem);
-                            this._detachPageUrlsAfterSave(urlItem);
-                        } catch(e) {
-                            this._log('[IMPORT] DB save error for ' + url + ': ' + e.message);
-                        }
-                    }
-
+                    // NOTE: Per-URL IDB save removed to reduce IPC congestion that competes
+                    // with onBeforeSendHeaders IPC calls. Batch saves happen at the end of
+                    // each batch in _processUrls(). If a crash occurs mid-batch, the
+                    // batch's resolved URLs can be recovered via Retry Failed.
 
                 } catch (error) {
                     this._log('[IMPORT] FAIL ' + url + ' -> ' + error.message);
@@ -1164,13 +1456,139 @@
                 }
             }
 
+
             // ---- Phase 2: Chapter Downloads (from cached data) ----
+            //
+            // Uses a manga-level worker pool (concurrent manga downloads) while each manga's
+            // chapters are processed sequentially to preserve CBZ ordering.
+            // Progress is tracked with an incrementing counter instead of O(n) scans.
+
+            /**
+             * Download a single manga's chapters sequentially. Extracted as a separate method
+             * so the manga-level worker pool in _processDownloads can call it concurrently.
+             * Returns { ok, fail } count for this manga.
+             */
+            async _downloadOneManga(mangaIndex, mangaRecords) {
+                let urlItem = mangaRecords[mangaIndex];
+                let meta = urlItem.mangaMeta;
+                let self = this;
+
+                let connector = Engine.Connectors.find(function(c) { return c.id === meta.connectorId; });
+                if (!connector) {
+                    this._log('[IMPORT] Connector not found: ' + meta.connectorId);
+                    return { ok: 0, fail: 0 };
+                }
+                let Manga = this._MangaClass;
+                if (!Manga) { this._log('[IMPORT] Manga class not loaded'); return { ok: 0, fail: 0 }; }
+                let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
+
+                if (!urlItem.chapters || urlItem.chapters.length === 0) {
+                    return { ok: 0, fail: 0 };
+                }
+
+                let localOk = 0;
+                let localFail = 0;
+                for (let c = 0; c < urlItem.chapters.length && this._phase === 'downloading'; c++) {
+                    let chapterRec = urlItem.chapters[c];
+
+                    // Skip already downloaded or failed chapters
+                    if (chapterRec.downloadStatus === 'downloaded') { localOk++; continue; }
+                    if (chapterRec.downloadStatus === 'failed') { localFail++; continue; }
+
+                    // Get page URLs from the non-observable cache (Map), falling back to the record if needed
+                    let pageUrls = this._getPageUrlsForChapter(urlItem, chapterRec);
+
+                    // Handle chapters with missing or empty page URLs.
+                    // null/undefined means the data was never fetched (corruption) — mark as failed
+                    // so the user can retry resolve to fetch them. Empty array means the chapter
+                    // legitimately has zero pages — count as downloaded.
+                    if (pageUrls === null || pageUrls === undefined) {
+                        chapterRec.downloadStatus = 'failed';
+                        chapterRec.downloadError = 'Page URLs missing (data corruption, re-run Resolve & Pre-fetch)';
+                        localFail++;
+                        this._downloadProgressFail++;
+                        continue;
+                    }
+                    if (pageUrls.length === 0) {
+                        chapterRec.downloadStatus = 'downloaded'; // legitimately zero pages
+                        localOk++;
+                        continue;
+                    }
+
+                    chapterRec.downloadStatus = 'downloading';
+
+                    // Create a Chapter object for Engine.Storage.saveChapterPages
+                    let ChapterClass = this._ChapterClass;
+                    if (!ChapterClass) throw new Error('Chapter class not loaded');
+                    let chapter = new ChapterClass(manga, chapterRec.chapterId, chapterRec.title);
+
+                    try {
+                        // Download page images using worker pool with AbortController
+                        // so Pause instantly stops in-flight network requests
+                        let maxConcurrent = this._pageConcurrency || 3;
+                        let results = [];
+                        let currentIndex = 0;
+                        let requestOptions = connector.requestOptions || {};
+                        let abortController = new AbortController();
+                        let signal = abortController.signal;
+                        this._abortControllers.push(abortController);
+
+                        async function worker() {
+                            while (currentIndex < pageUrls.length) {
+                                if (signal.aborted) {
+                                    throw new DOMException('Aborted', 'AbortError');
+                                }
+                                let pi = currentIndex++;
+                                let response = await fetch(pageUrls[pi], Object.assign({}, requestOptions, { signal: signal }));
+                                if (!response || signal.aborted) {
+                                    throw new DOMException('Aborted', 'AbortError');
+                                }
+                                if (response.status !== 200) {
+                                    throw new Error('Page ' + pageUrls[pi] + ' returned status ' + response.status);
+                                }
+                                results[pi] = await response.blob();
+                            }
+                        }
+
+                        let workers = [];
+                        for (let w = 0; w < maxConcurrent; w++) {
+                            workers.push(worker());
+                        }
+                        await Promise.all(workers);
+                        // Remove controller after successful completion
+                        let acIndex = this._abortControllers.indexOf(abortController);
+                        if (acIndex >= 0) this._abortControllers.splice(acIndex, 1);
+
+                        // Save to CBZ
+                        await Engine.Storage.saveChapterPages(chapter, results);
+
+                        chapterRec.downloadStatus = 'downloaded';
+                        localOk++;
+                        this._downloadProgressOk++;
+                        this._log('[IMPORT]     OK ' + chapter.title + ' saved');
+
+                    } catch (error) {
+                        this._log('[IMPORT]     FAIL ' + chapterRec.title + ' failed: ' + error.message);
+                        chapterRec.downloadStatus = 'failed';
+                        chapterRec.downloadError = error.message;
+                        localFail++;
+                        this._downloadProgressFail++;
+                    }
+
+                    // Evict this chapter's page URLs from the cache now that it's downloaded/failed
+                    let evictKey = urlItem.url + '::' + chapterRec.chapterId;
+                    this._pageUrlCache.delete(evictKey);
+                }
+
+                return { ok: localOk, fail: localFail };
+            }
 
             async _processDownloads() {
                 if (this._processing) return;
                 this._processing = true;
                 let self = this;
                 let delay = this._batchDelay;
+                let concurrency = this._concurrency;
 
                 // Gather all resolved manga records in order
                 let mangaRecords = [];
@@ -1179,130 +1597,97 @@
                         mangaRecords.push(this._urlRecords[i]);
                     }
                 }
-                this._log('[IMPORT] Starting downloads for ' + mangaRecords.length + ' manga (from cached data)');
+
+                // Pre-compute total chapter count once (from all records) for progress bar
+                let totalChapters = 0;
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].chapters) {
+                        totalChapters += this._urlRecords[i].chapters.length;
+                    }
+                }
+
+                // Initialize progress counters (cached as instance vars to avoid O(n) scans)
+                this._downloadProgressOk = 0;
+                this._downloadProgressFail = 0;
+
+                // Count already-downloaded / failed chapters from previous session
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].chapters) {
+                        for (let c = 0; c < this._urlRecords[i].chapters.length; c++) {
+                            let st = this._urlRecords[i].chapters[c].downloadStatus;
+                            if (st === 'downloaded') this._downloadProgressOk++;
+                            else if (st === 'failed') this._downloadProgressFail++;
+                        }
+                    }
+                }
+
+                // Throttled log: track last log time for manga-level progress
+                let lastMangaLogTime = 0;
+
+                this._log('[IMPORT] Starting downloads for ' + mangaRecords.length + ' manga (from cached data, ' + totalChapters + ' total chapters)');
 
                 try {
-                    for (let m = this._downloadMangaIndex; m < mangaRecords.length && this._phase === 'downloading'; m++) {
-                        let urlItem = mangaRecords[m];
-                        let meta = urlItem.mangaMeta;
-                        this._downloadMangaIndex = m;
+                    // Manga-level worker pool: process up to `concurrency` manga simultaneously
+                    let nextMangaIndex = 0;
 
-                        // Reconstruct manga object on demand
-                        let connector = Engine.Connectors.find(function(c) { return c.id === meta.connectorId; });
-                        if (!connector) {
-                            this._log('[IMPORT] Connector not found: ' + meta.connectorId);
-                            continue;
-                        }
-                        let Manga = this._MangaClass;
-                        if (!Manga) { this._log('[IMPORT] Manga class not loaded'); continue; }
-                        let manga = new Manga(connector, meta.mangaId, meta.mangaTitle);
+                    async function mangaWorker() {
+                        while (self._phase === 'downloading') {
+                            let m;
+                            // Atomically grab the next unprocessed manga index
+                            m = nextMangaIndex++;
+                            if (m >= mangaRecords.length) break;
 
-                        if (!urlItem.chapters || urlItem.chapters.length === 0) {
-                            this._log('[IMPORT]   -> No chapters for ' + meta.mangaTitle);
-                            continue;
-                        }
+                            let urlItem = mangaRecords[m];
+                            let meta = urlItem.mangaMeta;
+                            let mangaTitle = meta ? meta.mangaTitle : 'unknown';
 
-                        this.set('_statusText', 'Downloading: ' + meta.mangaTitle + ' (' + (m+1) + '/' + mangaRecords.length + ' manga)');
-                        this._log('[IMPORT] Processing manga ' + (m+1) + '/' + mangaRecords.length + ': ' + meta.mangaTitle + ' (' + urlItem.chapters.length + ' chapters)');
-
-                        // Pre-compute total for progress
-                        let totalChapters = 0;
-                        for (let i = 0; i < this._urlRecords.length; i++) {
-                            if (this._urlRecords[i].chapters) totalChapters += this._urlRecords[i].chapters.length;
-                        }
-
-                        for (let c = 0; c < urlItem.chapters.length && this._phase === 'downloading'; c++) {
-                            let chapterRec = urlItem.chapters[c];
-
-                            // Skip already downloaded or failed chapters
-                            if (chapterRec.downloadStatus === 'downloaded') continue;
-                            if (chapterRec.downloadStatus === 'failed') continue;
-
-                            // Get page URLs from the non-observable cache (Map), falling back to the record if needed
-                            let pageUrls = this._getPageUrlsForChapter(urlItem, chapterRec);
-
-                            // Skip chapters without cached page URLs
-                            if (!pageUrls || pageUrls.length === 0) {
-                                chapterRec.downloadStatus = 'downloaded'; // nothing to download
-                                continue;
+                            // Log manga start (throttled to avoid flood from concurrent workers)
+                            let now = Date.now();
+                            if (now - lastMangaLogTime > 1000) {
+                                lastMangaLogTime = now;
+                                self._log('[IMPORT] Processing manga ' + (m+1) + '/' + mangaRecords.length + ': ' + mangaTitle + ' (' + urlItem.chapters.length + ' chapters)');
+                                self.set('_statusText', 'Downloading: ' + mangaTitle + ' (' + (m+1) + '/' + mangaRecords.length + ' manga)');
                             }
 
-                            chapterRec.downloadStatus = 'downloading';
-                            this._refreshDisplayUrls();
+                            let result = await self._downloadOneManga(m, mangaRecords);
 
-                            // Create a Chapter object for Engine.Storage.saveChapterPages
-                            let ChapterClass = this._ChapterClass;
-                            if (!ChapterClass) throw new Error('Chapter class not loaded');
-                            let chapter = new ChapterClass(manga, chapterRec.chapterId, chapterRec.title);
-
-                            try {
-                                // Download page images using worker pool (same as before)
-                                let maxConcurrent = this._pageConcurrency || 3;
-                                let results = [];
-                                let currentIndex = 0;
-                                let requestOptions = connector.requestOptions || {};
-
-                                async function worker() {
-                                    while (currentIndex < pageUrls.length) {
-                                        let pi = currentIndex++;
-                                        let response = await fetch(pageUrls[pi], requestOptions);
-                                        if (response.status !== 200) {
-                                            throw new Error('Page ' + pageUrls[pi] + ' returned status ' + response.status);
-                                        }
-                                        results[pi] = await response.blob();
-                                    }
-                                }
-
-
-                                let workers = [];
-                                for (let w = 0; w < maxConcurrent; w++) {
-                                    workers.push(worker());
-                                }
-                                await Promise.all(workers);
-
-                                // Save to CBZ
-                                await Engine.Storage.saveChapterPages(chapter, results);
-
-                                chapterRec.downloadStatus = 'downloaded';
-                                this._log('[IMPORT]     OK ' + chapter.title + ' saved');
-
-                            } catch (error) {
-                                this._log('[IMPORT]     FAIL ' + chapterRec.title + ' failed: ' + error.message);
-                                chapterRec.downloadStatus = 'failed';
-                                chapterRec.downloadError = error.message;
-                            }
-
-                            // Update progress
-                            let downloadedCount = 0;
-                            for (let i = 0; i < this._urlRecords.length; i++) {
-                                if (this._urlRecords[i].chapters) {
-                                    for (let j = 0; j < this._urlRecords[i].chapters.length; j++) {
-                                        if (this._urlRecords[i].chapters[j].downloadStatus === 'downloaded') downloadedCount++;
-                                    }
-                                }
-                            }
-                            let pct = totalChapters > 0 ? Math.round((downloadedCount / totalChapters) * 100) : 0;
-                            this.set('_progressPercent', pct);
-                            this.set('_statusText', 'Downloading: ' + meta.mangaTitle + ' - ' + chapterRec.title + ' (' + downloadedCount + '/' + totalChapters + ' chapters)');
-                            this._refreshDisplayUrls();
-
-                            // Save chapter status to IndexedDB
-                            if (this._db && c % 3 === 0) {
+                            // After manga finishes, save its state to IndexedDB and apply per-manga delay
+                            if (self._db) {
                                 try {
                                     self._reattachPageUrlsForSave(urlItem);
-                                    await this._db.putUrl(urlItem);
+                                    await self._db.putUrl(urlItem);
                                     self._detachPageUrlsAfterSave(urlItem);
                                 } catch(e) {
                                     self._log('[IMPORT] Chapter save error: ' + e.message);
                                 }
                             }
 
+                            // Update progress bar using cached counters (O(1) instead of O(n))
+                            let totalDone = self._downloadProgressOk + self._downloadProgressFail;
+                            let pct = totalChapters > 0 ? Math.round((totalDone / totalChapters) * 100) : 0;
+                            self.set('_progressPercent', pct);
+                            self.set('_statusText', 'Downloading: ' + mangaTitle + ' (' + totalDone + '/' + totalChapters + ' chapters)');
 
-                            if (delay > 0 && this._phase === 'downloading') {
+                            // Throttled display refresh
+                            let now2 = Date.now();
+                            if (now2 - self._lastRefreshTime > 500) {
+                                self._lastRefreshTime = now2;
+                                self._refreshDisplayUrls();
+                            }
+
+                            // Apply per-manga delay instead of per-chapter delay
+                            if (delay > 0 && self._phase === 'downloading') {
                                 await new Promise(function(resolve) { setTimeout(resolve, delay); });
                             }
                         }
                     }
+
+                    // Launch the worker pool
+                    let workers = [];
+                    for (let w = 0; w < concurrency; w++) {
+                        workers.push(mangaWorker());
+                    }
+                    await Promise.all(workers);
 
                     // Final save - reattach pageUrls from cache for IDB, then detach after
                     if (this._db) {
@@ -1319,19 +1704,9 @@
                         }
                     }
 
-
                     if (this._phase === 'downloading') {
-                        // Count results
-                        let totalDownloaded = 0;
-                        let totalFailed = 0;
-                        for (let i = 0; i < this._urlRecords.length; i++) {
-                            if (this._urlRecords[i].chapters) {
-                                for (let c = 0; c < this._urlRecords[i].chapters.length; c++) {
-                                    if (this._urlRecords[i].chapters[c].downloadStatus === 'downloaded') totalDownloaded++;
-                                    if (this._urlRecords[i].chapters[c].downloadStatus === 'failed') totalFailed++;
-                                }
-                            }
-                        }
+                        let totalDownloaded = this._downloadProgressOk;
+                        let totalFailed = this._downloadProgressFail;
                         this._log('[IMPORT] Downloads finished: ' + totalDownloaded + ' OK, ' + totalFailed + ' failed');
                         if (totalFailed === 0 && totalDownloaded > 0) {
                             this.set('_phase', 'done');
