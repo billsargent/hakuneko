@@ -197,6 +197,10 @@
                 <template is="dom-if" if="[[ _showDownloadResolved ]]">
                     <button class="button primary" on-click="_onDownloadResolvedClick">⬇ Download Pre-fetched</button>
                 </template>
+                <!-- Resume pre-fetched download after pause -->
+                <template is="dom-if" if="[[ _showResumePrefetched ]]">
+                    <button class="button primary" on-click="_onResumePrefetchedClick">⟳ Resume Pre-fetched</button>
+                </template>
 
                 <!-- Phase 2: Download -->
 
@@ -344,6 +348,7 @@
                     _showEmptyMessage: { type: Boolean, computed: '_computeEmptyMessage(_totalUrlCount, _visible)' },
                     _showDownloadResolved: { type: Boolean, computed: '_computeShowDownloadResolved(_phase, _downloadResolvedActive)' },
                     _downloadResolvedActive: { type: Boolean, value: false },
+                    _showResumePrefetched: { type: Boolean, computed: '_computeShowResumePrefetched(_phase, _downloadResolvedActive)' },
                     _phaseLabel: { type: String, computed: '_computePhaseLabel(_phase)' },
 
                     _phaseClass: { type: String, computed: '_computePhaseClass(_phase)' },
@@ -453,6 +458,9 @@
                     }
                 }
                 return resolvedCount > 0;
+            }
+            _computeShowResumePrefetched(phase, downloadResolvedActive) {
+                return phase === 'download-paused' && downloadResolvedActive;
             }
             _computeShowDownloadStart(phase, processing) { return phase === 'resolve-done' && !processing; }
             _computeShowDownloadResume(phase) { return phase === 'download-paused'; }
@@ -939,13 +947,66 @@
                 await this._processDownloads();
                 this._deferClearState = false;
                 // Restore to resolve-paused so the user can continue resolving the rest
-                if (this._phase === 'done' || this._phase === 'download-paused' || this._phase === 'resolve-done') {
+                // BUT only if not paused — if phase is 'download-paused', keep _downloadResolvedActive
+                // so the "Resume Pre-fetched" button appears.
+                if (this._phase === 'done' || this._phase === 'resolve-done') {
                     this._log('[IMPORT] Returning to resolve-paused after pre-fetched download');
                     this.set('_phase', 'resolve-paused');
                     this.set('_statusText', 'Pre-fetched downloads finished. Resume resolving to continue.');
                     await this._saveMeta();
+                    this.set('_downloadResolvedActive', false);
+                } else if (this._phase === 'download-paused') {
+                    // User paused during pre-fetched download — keep _downloadResolvedActive=true
+                    // so the "Resume Pre-fetched" button shows in the UI
+                    this._log('[IMPORT] Pre-fetched download paused. Keep _downloadResolvedActive for Resume button.');
+                    this.set('_statusText', 'Pre-fetched downloads paused. Click Resume Pre-fetched to continue.');
+                    // Keep _downloadResolvedActive=true so _computeShowResumePrefetched returns true
+                    return; // skip setting _downloadResolvedActive to false
                 }
                 this.set('_downloadResolvedActive', false);
+                this._refreshDisplayUrls();
+            }
+
+            async _onResumePrefetchedClick() {
+                this._log('[IMPORT] -> Resume Pre-fetched clicked');
+                if (this._processing) return;
+                // Count remaining resolved manga with remaining chapters
+                let remainingManga = 0;
+                let remainingChapters = 0;
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].resolveStatus === 'resolved') {
+                        let hasRemaining = false;
+                        if (this._urlRecords[i].chapters) {
+                            for (let c = 0; c < this._urlRecords[i].chapters.length; c++) {
+                                let st = this._urlRecords[i].chapters[c].downloadStatus;
+                                if (st !== 'downloaded' && st !== 'failed') {
+                                    remainingChapters++;
+                                    hasRemaining = true;
+                                }
+                            }
+                        }
+                        if (hasRemaining) remainingManga++;
+                    }
+                }
+                this._log('[IMPORT] Resuming pre-fetched download for ' + remainingManga + ' manga (' + remainingChapters + ' remaining chapters)');
+                this.set('_phase', 'downloading');
+                // Keep _downloadResolvedActive=true so that _computeShowResumePrefetched still works
+                // when/if paused again
+                this._downloadMangaIndex = 0;
+                this.set('_expandedUrl', null);
+                await this._processDownloads();
+                // After completion, check phase
+                if (this._phase === 'done' || this._phase === 'resolve-done') {
+                    this._log('[IMPORT] Pre-fetched download complete, returning to resolve-paused');
+                    this.set('_phase', 'resolve-paused');
+                    this.set('_statusText', 'Pre-fetched downloads finished. Resume resolving to continue.');
+                    await this._saveMeta();
+                    this.set('_downloadResolvedActive', false);
+                } else if (this._phase === 'download-paused') {
+                    this._log('[IMPORT] Pre-fetched download paused again.');
+                    this.set('_statusText', 'Pre-fetched downloads paused. Click Resume Pre-fetched to continue.');
+                    // Keep _downloadResolvedActive=true
+                }
                 this._refreshDisplayUrls();
             }
 
