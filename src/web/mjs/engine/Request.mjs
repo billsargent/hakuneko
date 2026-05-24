@@ -17,6 +17,9 @@ export default class Request {
         this._settings = settings;
         this._settings.addEventListener('loaded', this._onSettingsChanged.bind(this));
         this._settings.addEventListener('saved', this._onSettingsChanged.bind(this));
+
+        // Track all open BrowserWindows so they can be cleaned up on pause
+        this._openWindows = new Set();
     }
 
     async _initializeHCaptchaUUID(settings) {
@@ -232,6 +235,9 @@ export default class Request {
             });
         }
 
+        // Track this window for cleanup
+        this._openWindows.add(win);
+
         return new Promise((resolve, reject) => {
             let preventCallback = false;
 
@@ -255,6 +261,7 @@ export default class Request {
             win.webContents.on('did-finish-load', async () => {
                 try {
                     if (await this._checkScrapingRedirection(win)) {
+                        this._fetchUICleanup(win, abortAction);
                         return;
                     }
                     let jsResult = await win.webContents.executeJavaScript(runtimeScript);
@@ -295,6 +302,9 @@ export default class Request {
         // TODO: blacklist seems to be applied to all web requests, not just to the one in this browser window
         win.webContents.session.webRequest.onBeforeRequest({ urls: Engine.Blacklist.patterns }, (_, callback) => callback({ cancel: true }));
 
+        // Track this window for cleanup
+        this._openWindows.add(win);
+
         return new Promise((resolve, reject) => {
             let preventCallback = false;
 
@@ -318,6 +328,7 @@ export default class Request {
             win.webContents.on('did-finish-load', async () => {
                 try {
                     if (await this._checkScrapingRedirection(win)) {
+                        this._fetchUICleanup(win, abortAction);
                         return;
                     }
                     let jsResult = await win.webContents.executeJavaScript(runtimeScript);
@@ -358,6 +369,9 @@ export default class Request {
                 callback({ cancel: true });
             });
 
+            // Track this window for cleanup
+            this._openWindows.add(win);
+
             let preventCallback = false;
 
             let abortAction = setTimeout(() => {
@@ -372,6 +386,7 @@ export default class Request {
             win.webContents.on('did-finish-load', async () => {
                 try {
                     if (await this._checkScrapingRedirection(win)) {
+                        this._fetchUICleanup(win, abortAction);
                         return;
                     }
                     let jsResult = await win.webContents.executeJavaScript(injectionScript);
@@ -409,11 +424,26 @@ export default class Request {
             if (browserWindow.webContents.debugger.isAttached()) {
                 browserWindow.webContents.debugger.detach();
             }
-            // unsubscribe events from session
-            browserWindow.webContents.session.webRequest.onBeforeRequest(null);
+            // Remove from tracking set
+            if (this._openWindows) {
+                this._openWindows.delete(browserWindow);
+            }
             browserWindow.close();
         }
         browserWindow = null;
+    }
+
+    /**
+     * Close all tracked BrowserWindows (e.g. when queue is paused)
+     */
+    closeAllWindows() {
+        if (!this._openWindows || this._openWindows.size === 0) {
+            return;
+        }
+        for (const win of this._openWindows) {
+            this._fetchUICleanup(win, undefined);
+        }
+        this._openWindows.clear();
     }
 
     /**

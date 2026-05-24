@@ -209,6 +209,9 @@
                 <template is="dom-if" if="[[ _showImportButton ]]">
                     <button class="button" on-click="openFilePicker">📂 Import File</button>
                 </template>
+                <template is="dom-if" if="[[ _showExportButton ]]">
+                    <button class="button" on-click="_onExportClick">&#x1F4E4; Export JSON</button>
+                </template>
                 <template is="dom-if" if="[[ _showRetryFailed ]]">
                     <button class="button primary" on-click="_onRetryFailedClick" disabled$="[[ _processing ]]">⟳ Retry Failed</button>
                 </template>
@@ -236,7 +239,7 @@
                     </select>
                 </label>
 
-                <label>Page Concurrency:
+                <label>Chapter Concurrency:
                     <select value="{{ _pageConcurrency::change }}">
                         <option value="1">1</option>
                         <option value="2">2</option>
@@ -326,10 +329,11 @@
                     _processing: { type: Boolean, value: false },
                     // Computed UI flags
                     _showResolveStart: { type: Boolean, computed: '_computeShowResolveStart(_phase, _totalUrlCount, _processing)' },
-                    _showResolveResume: { type: Boolean, computed: '_computeShowResolveResume(_phase, _processing)' },
+                    _showResolveResume: { type: Boolean, computed: '_computeShowResolveResume(_phase)' },
                     _showDownloadStart: { type: Boolean, computed: '_computeShowDownloadStart(_phase, _processing)' },
-                    _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase, _processing)' },
+                    _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase)' },
                     _showImportButton: { type: Boolean, computed: '_computeShowImportButton(_phase, _processing)' },
+                    _showExportButton: { type: Boolean, computed: '_computeShowExportButton(_phase, _processing, _totalUrlCount)' },
                     _showRetryFailed: { type: Boolean, computed: '_computeShowRetryFailed(_phase, _processing, _totalUrlCount)' },
                     _showEmptyMessage: { type: Boolean, computed: '_computeEmptyMessage(_totalUrlCount, _visible)' },
                     _phaseLabel: { type: String, computed: '_computePhaseLabel(_phase)' },
@@ -424,10 +428,11 @@
             _computeIsDownloading(phase) { return phase === 'downloading'; }
             _computeIsRunning(phase) { return phase === 'resolving' || phase === 'downloading'; }
             _computeShowResolveStart(phase, urlCount, processing) { return phase === 'idle' && urlCount > 0 && !processing; }
-            _computeShowResolveResume(phase, processing) { return phase === 'resolve-paused' && !processing; }
+            _computeShowResolveResume(phase) { return phase === 'resolve-paused'; }
             _computeShowDownloadStart(phase, processing) { return phase === 'resolve-done' && !processing; }
-            _computeShowDownloadResume(phase, processing) { return phase === 'download-paused' && !processing; }
+            _computeShowDownloadResume(phase) { return phase === 'download-paused'; }
             _computeShowImportButton(phase, processing) { return phase === 'idle' || phase === 'resolve-done'; }
+            _computeShowExportButton(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
             _computeShowRetryFailed(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
             _computeEmptyMessage(urlCount, visible) { return visible && urlCount === 0; }
 
@@ -882,6 +887,10 @@
 
             async _pauseQueue() {
                 this._log('[IMPORT] PAUSING...');
+                // Close any open BrowserWindows created by connectors during resolution
+                if (Engine && Engine.Request && Engine.Request.closeAllWindows) {
+                    Engine.Request.closeAllWindows();
+                }
                 // Abort all in-flight download requests immediately
                 // This causes the worker pool's fetch() calls to throw AbortError,
                 // which will mark the current chapter as failed (can be retried later)
@@ -898,6 +907,10 @@
                 this._log('[IMPORT] Reset clicked');
                 if (this._isRunning) {
                     if (!confirm('Reset will stop the current import. Are you sure?')) return;
+                }
+                // Close any open BrowserWindows created by connectors during resolution
+                if (Engine && Engine.Request && Engine.Request.closeAllWindows) {
+                    Engine.Request.closeAllWindows();
                 }
                 // Abort any in-flight download requests
                 this._abortControllers.forEach(function(c) { c.abort(); });
@@ -940,9 +953,128 @@
                 this._processUrls();
             }
 
+            // ---- Export to JSON ----
+
+            async _onExportClick() {
+                this._log('[IMPORT] -> Export to JSON clicked');
+                if (!this._db) {
+                    this._log('[IMPORT] No IndexedDB available');
+                    return;
+                }
+                try {
+                    this.set('_statusText', 'Reading records from IndexedDB...');
+                    this._log('[IMPORT] Reading URL records from IndexedDB using cursor...');
+
+                    // Use cursor-based iteration to avoid "Maximum IPC message size exceeded"
+                    // when the dataset is large. getAllUrlsCursor() streams records individually.
+                    // pageUrls arrays are kept on records since they contain the actual image URLs
+                    // that users want in the exported JSON. The streaming write loop below handles
+                    // them without UI freezing because each record is stringified individually.
+                    let urls = [];
+                    await this._db.getAllUrlsCursor(function(record) {
+                        urls.push(record);
+                    });
+                    this._log('[IMPORT] Read ' + urls.length + ' URL records from IndexedDB');
+
+                    // Yield to let Polymer re-render status text changes
+                    await new Promise(r => setTimeout(r, 0));
+
+                    // Read meta keys
+                    let phase = await this._db.getMeta('phase');
+                    let concurrency = await this._db.getMeta('concurrency');
+                    let batchDelay = await this._db.getMeta('batchDelay');
+                    let pageConcurrency = await this._db.getMeta('pageConcurrency');
+                    let urlTimeout = await this._db.getMeta('urlTimeout');
+
+                    // Yield to let Polymer re-render status text changes
+                    await new Promise(r => setTimeout(r, 0));
+
+                    // Generate timestamp for filename
+                    let now = new Date();
+                    let dateStr = now.toLocaleDateString('en-CA'); // 2026-05-23
+                    let timeStr = now.toLocaleTimeString('en-US', { hour12: false }); // 14:41:41
+                    let fileTimestamp = dateStr + '_' + timeStr.replace(/:/g, '-'); // 2026-05-23_14-41-41
+
+                    this.set('_statusText', 'Opening save dialog...');
+                    let result = await this._electron.remote.dialog.showSaveDialog({
+                        title: 'Export Import Queue',
+                        defaultPath: 'hakuneko-import-queue_' + fileTimestamp + '.json',
+                        filters: [
+                            { name: 'JSON Files', extensions: ['json'] }
+                        ]
+                    });
+
+                    if (result.canceled || !result.filePath) {
+                        this._log('[IMPORT] Export cancelled by user');
+                        this.set('_statusText', 'Export cancelled');
+                        return;
+                    }
+
+                    this._log('[IMPORT] Writing to file: ' + result.filePath);
+                    this.set('_statusText', 'Writing ' + urls.length + ' records to ' + result.filePath + '...');
+
+                    // Stream-write JSON to file using WriteStream.
+                    // This avoids materializing the entire JSON string in memory and
+                    // allows yielding between batches so the UI stays responsive.
+                    let fs = require('fs');
+                    let stream = fs.createWriteStream(result.filePath, { encoding: 'utf8' });
+
+                    // Write opening: { "version": 1, ..., "urls": [
+                    stream.write('{\n');
+                    stream.write('  "version": 1,\n');
+                    stream.write('  "exportedAt": ' + JSON.stringify(now.toISOString()) + ',\n');
+                    stream.write('  "meta": {\n');
+                    stream.write('    "phase": ' + JSON.stringify(phase) + ',\n');
+                    stream.write('    "concurrency": ' + concurrency + ',\n');
+                    stream.write('    "batchDelay": ' + batchDelay + ',\n');
+                    stream.write('    "pageConcurrency": ' + pageConcurrency + ',\n');
+                    stream.write('    "urlTimeout": ' + urlTimeout + '\n');
+                    stream.write('  },\n');
+                    stream.write('  "urls": [\n');
+
+                    // Write each record as JSON, yielding every 500 records
+                    const YIELD_INTERVAL = 500;
+                    for (let i = 0; i < urls.length; i++) {
+                        stream.write(JSON.stringify(urls[i]));
+                        if (i < urls.length - 1) {
+                            stream.write(',');
+                        }
+                        stream.write('\n');
+
+                        // Yield every YIELD_INTERVAL records to keep the UI responsive
+                        if (i > 0 && i % YIELD_INTERVAL === 0) {
+                            this._log('[IMPORT] Writing: ' + i + '/' + urls.length + ' records');
+                            this.set('_statusText', 'Writing ' + i + '/' + urls.length + ' records to ' + result.filePath + '...');
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+
+                    // Write closing: ]}
+                    stream.write(']\n');
+                    stream.write('}\n');
+
+                    // Close the stream and wait for it to finish flushing to disk
+                    await new Promise(function(resolve, reject) {
+                        stream.end(resolve);
+                        stream.on('error', reject);
+                    });
+
+                    // Yield to let Polymer re-render the final status text
+                    await new Promise(r => setTimeout(r, 0));
+
+                    this._log('[IMPORT] Exported ' + urls.length + ' URL records to ' + result.filePath);
+                    this._log('[IMPORT] Export complete at ' + dateStr + ', ' + now.toLocaleTimeString('en-US', { hour12: true }));
+                    this.set('_statusText', 'Exported ' + urls.length + ' records to ' + result.filePath);
+                } catch(e) {
+                    this._log('[IMPORT] Export error: ' + e.message);
+                    this.set('_statusText', 'Export failed: ' + e.message);
+                }
+            }
+
             // ---- File Picker ----
 
             async openFilePicker() {
+
                 this._log('[IMPORT] Opening file picker dialog...');
                 let result = await this._electron.remote.dialog.showOpenDialog({
                     title: 'Select URL Import File',
@@ -1379,64 +1511,81 @@
                         return;
                     }
 
-                    // For each chapter, fetch page URLs and cache them
+                    // Pre-allocate chapter records so concurrent workers can populate them in-place
                     let chapterRecords = [];
                     for (let c = 0; c < chapters.length; c++) {
-                        let chapter = chapters[c];
-                        let record = {
-                            chapterId: chapter.id,
-                            title: chapter.title,
+                        chapterRecords.push({
+                            chapterId: chapters[c].id,
+                            title: chapters[c].title,
                             pageUrls: null,
                             downloadStatus: 'pending',
                             downloadError: null
-                        };
-
-                        try {
-                            // Pre-fetch page URLs for this chapter
-                            let pages = await new Promise(function(resolve, reject) {
-                                chapter.getPages(function(error, data) {
-                                    if (error) reject(error);
-                                    else resolve(data);
-                                });
-                            });
-
-                            // Phase check: bail if paused after each getPages
-                            if (this._phase !== 'resolving') {
-                                record.downloadStatus = 'failed';
-                                record.downloadError = 'Paused during page pre-fetch';
-                                chapterRecords.push(record);
-                                // Don't process remaining chapters, break out of the loop
-                                break;
-                            }
-
-                            if (pages instanceof Array) {
-                                record.pageUrls = pages;
-                                record.downloadStatus = 'pages-ready'; // page URLs cached, ready to download images
-                            } else {
-                                // Anime/video content - skip
-                                record.downloadStatus = 'failed';
-                                record.downloadError = 'Non-image content (video/stream)';
-                            }
-                        } catch(e) {
-                            record.downloadStatus = 'failed';
-                            record.downloadError = e.message;
-                        }
-
-                        chapterRecords.push(record);
+                        });
                     }
+
+                    // Use controlled concurrency for chapter page-fetches within each manga
+                    // to avoid sequentially waiting for each chapter's getPages().
+                    // Reuses the existing _pageConcurrency setting from the UI dropdown.
+                    let pageConcurrency = this._pageConcurrency || 5;
+                    let chapterFetchIndex = 0;
+
+                    async function fetchChapterPages() {
+                        while (chapterFetchIndex < chapterRecords.length) {
+                            let ci = chapterFetchIndex++;
+                            if (ci >= chapterRecords.length) break;
+
+                            let record = chapterRecords[ci];
+                            let chapter = chapters[ci];
+
+                            try {
+                                // Pre-fetch page URLs for this chapter
+                                let pages = await new Promise(function(resolve, reject) {
+                                    chapter.getPages(function(error, data) {
+                                        if (error) reject(error);
+                                        else resolve(data);
+                                    });
+                                });
+
+                                // Phase check: bail if paused after getPages
+                                if (self._phase !== 'resolving') {
+                                    record.downloadStatus = 'failed';
+                                    record.downloadError = 'Paused during page pre-fetch';
+                                    // Signal other workers to stop by advancing index past end
+                                    chapterFetchIndex = chapterRecords.length;
+                                    break;
+                                }
+
+                                if (pages instanceof Array) {
+                                    record.pageUrls = pages;
+                                    record.downloadStatus = 'pages-ready'; // page URLs cached, ready to download images
+                                } else {
+                                    // Anime/video content - skip
+                                    record.downloadStatus = 'failed';
+                                    record.downloadError = 'Non-image content (video/stream)';
+                                }
+                            } catch(e) {
+                                record.downloadStatus = 'failed';
+                                record.downloadError = e.message;
+                            }
+
+                            // Cache pageUrls in the non-observable Map for faster access during downloads.
+                            // pageUrls are kept on the chapter records as a fallback so that chapter downloads
+                            // still work even if entries are evicted from the cache by _trimPageUrlCache().
+                            if (record.pageUrls && record.pageUrls.length > 0) {
+                                self._pageUrlCache.set(urlItem.url + '::' + record.chapterId, record.pageUrls);
+                            }
+                        }
+                    }
+
+                    // Launch worker pool for concurrent chapter page-fetching
+                    let workers = [];
+                    for (let w = 0; w < pageConcurrency; w++) {
+                        workers.push(fetchChapterPages());
+                    }
+                    await Promise.all(workers);
 
                     urlItem.chapters = chapterRecords;
                     urlItem.resolveStatus = 'resolved';
-
-                    // Cache pageUrls in the non-observable Map for faster access during downloads.
-                    // pageUrls are kept on the chapter records as a fallback so that chapter downloads
-                    // still work even if entries are evicted from the cache by _trimPageUrlCache().
-                    for (let ci = 0; ci < chapterRecords.length; ci++) {
-                        let ch = chapterRecords[ci];
-                        if (ch.pageUrls && ch.pageUrls.length > 0) {
-                            this._pageUrlCache.set(urlItem.url + '::' + ch.chapterId, ch.pageUrls);
-                        }
-                    }
 
                     // Log success with manga title and chapter count
                     this._log('[IMPORT] OK ' + urlItem.mangaMeta.mangaTitle + ' (' + chapterRecords.length + ' chapters, ' + chapterRecords.filter(function(c) { return c.downloadStatus === 'pages-ready'; }).length + ' with page URLs)');

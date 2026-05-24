@@ -376,6 +376,12 @@ module.exports = class ElectronBootstrap {
     _setupBeforeSendHeaders() {
         // inject headers before a request is made (call the handler in the webapp to do the dirty work)
         electron.session.defaultSession.webRequest.onBeforeSendHeaders(urlFilterAll, async (details, callback) => {
+            // Avoid IPC congestion: skip header modification for requests from connector
+            // BrowserWindows (which flood IPC during import queue resolution).
+            if (details.webContentsId !== this._window.webContents.id) {
+                callback({ cancel: false, requestHeaders: details.requestHeaders });
+                return;
+            }
             try {
                 let result = await this._ipcSend('on-before-send-headers', details);
                 callback({
@@ -394,6 +400,12 @@ module.exports = class ElectronBootstrap {
 
     _setupHeadersReceived() {
         electron.session.defaultSession.webRequest.onHeadersReceived(urlFilterAll, async (details, callback) => {
+            // Avoid IPC congestion: skip header modification for requests from connector
+            // BrowserWindows (which flood IPC during import queue resolution).
+            if (details.webContentsId !== this._window.webContents.id) {
+                callback({ cancel: false, responseHeaders: details.responseHeaders });
+                return;
+            }
             try {
                 let result = await this._ipcSend('on-headers-received', details);
                 callback({
