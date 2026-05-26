@@ -224,6 +224,9 @@
                 <template is="dom-if" if="[[ _showRetryFailed ]]">
                     <button class="button primary" on-click="_onRetryFailedClick" disabled$="[[ _processing ]]">⟳ Retry Failed</button>
                 </template>
+                <template is="dom-if" if="[[ _showMarkDone ]]">
+                    <button class="button primary" on-click="_onMarkDoneClick">✓ Mark Done</button>
+                </template>
 
                 <label>Concurrency:
                     <select value="{{ _concurrency::change }}">
@@ -348,6 +351,7 @@
                     _showDownloadResolved: { type: Boolean, computed: '_computeShowDownloadResolved(_phase, _downloadResolvedActive)' },
                     _downloadResolvedActive: { type: Boolean, value: false },
                     _showResumePrefetched: { type: Boolean, computed: '_computeShowResumePrefetched(_phase, _downloadResolvedActive)' },
+                    _showMarkDone: { type: Boolean, computed: '_computeShowMarkDone(_phase, _downloadResolvedActive)' },
                     _phaseLabel: { type: String, computed: '_computePhaseLabel(_phase)' },
                     _phaseClass: { type: String, computed: '_computePhaseClass(_phase)' },
                     _phaseSubtext: { type: String, computed: '_computePhaseSubtext(_phase)' },
@@ -466,6 +470,9 @@
             _computeShowImportButton(phase, processing) { return phase === 'idle' || phase === 'resolve-done'; }
             _computeShowExportButton(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
             _computeShowRetryFailed(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
+            _computeShowMarkDone(phase, downloadResolvedActive) {
+                return phase === 'download-paused' && !downloadResolvedActive;
+            }
             _computeEmptyMessage(urlCount, visible) { return visible && urlCount === 0; }
 
             _computePhaseLabel(phase) {
@@ -910,9 +917,23 @@
             _onDownloadResumeClick() {
                 this._log('[IMPORT] -> Resume Downloads clicked');
                 if (this._processing) return;
+                // Reset all failed chapters to 'pending' so they get retried
+                let resetCount = 0;
+                for (let i = 0; i < this._urlRecords.length; i++) {
+                    if (this._urlRecords[i].chapters) {
+                        for (let c = 0; c < this._urlRecords[i].chapters.length; c++) {
+                            if (this._urlRecords[i].chapters[c].downloadStatus === 'failed') {
+                                this._urlRecords[i].chapters[c].downloadStatus = 'pending';
+                                this._urlRecords[i].chapters[c].downloadError = null;
+                                resetCount++;
+                            }
+                        }
+                    }
+                }
+                if (resetCount > 0) {
+                    this._log('[IMPORT] Reset ' + resetCount + ' failed chapters to pending for retry');
+                }
                 this.set('_phase', 'downloading');
-                // Reset manga index so worker pool re-scans from the beginning;
-                // per-chapter downloadStatus checks will skip already-completed work.
                 this._downloadMangaIndex = 0;
                 this.set('_expandedUrl', null);
                 this._processDownloads();
@@ -1055,6 +1076,15 @@
                 this.set('_statusText', 'Ready');
                 this.set('_expandedUrl', null);
                 await this._clearSavedState();
+            }
+
+            async _onMarkDoneClick() {
+                this._log('[IMPORT] -> Mark Done clicked (' + this._downloadProgressOk + ' OK, ' + this._downloadProgressFail + ' failed)');
+                if (this._processing) return;
+                this.set('_phase', 'done');
+                this.set('_statusText', 'Done: ' + this._downloadProgressOk + ' chapters downloaded, ' + this._downloadProgressFail + ' failed/missed.');
+                this.set('_progressPercent', 100);
+                await this._saveMeta();
             }
 
             async _onRetryFailedClick() {
