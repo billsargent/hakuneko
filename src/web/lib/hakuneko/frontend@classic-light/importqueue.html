@@ -19,7 +19,7 @@
                 flex-direction: row;
                 padding: 0.25em;
                 font-weight: bold;
-            }
+            } 
             .header-title {
                 flex: 1;
                 padding: 0.25em;
@@ -339,9 +339,9 @@
                     _processing: { type: Boolean, value: false },
                     // Computed UI flags
                     _showResolveStart: { type: Boolean, computed: '_computeShowResolveStart(_phase, _totalUrlCount, _processing)' },
-                    _showResolveResume: { type: Boolean, computed: '_computeShowResolveResume(_phase)' },
+                    _showResolveResume: { type: Boolean, computed: '_computeShowResolveResume(_phase, _downloadResolvedActive)' },
                     _showDownloadStart: { type: Boolean, computed: '_computeShowDownloadStart(_phase, _processing)' },
-                    _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase)' },
+                    _showDownloadResume: { type: Boolean, computed: '_computeShowDownloadResume(_phase, _downloadResolvedActive)' },
                     _showImportButton: { type: Boolean, computed: '_computeShowImportButton(_phase, _processing)' },
                     _showExportButton: { type: Boolean, computed: '_computeShowExportButton(_phase, _processing, _totalUrlCount)' },
                     _showRetryFailed: { type: Boolean, computed: '_computeShowRetryFailed(_phase, _processing, _totalUrlCount)' },
@@ -443,7 +443,7 @@
             _computeIsDownloading(phase) { return phase === 'downloading'; }
             _computeIsRunning(phase) { return phase === 'resolving' || phase === 'downloading'; }
             _computeShowResolveStart(phase, urlCount, processing) { return phase === 'idle' && urlCount > 0 && !processing; }
-            _computeShowResolveResume(phase) { return phase === 'resolve-paused'; }
+            _computeShowResolveResume(phase, downloadResolvedActive) { return phase === 'resolve-paused' || (phase === 'download-paused' && downloadResolvedActive); }
             _computeShowDownloadResolved(phase, downloadResolvedActive) {
                 if (phase !== 'resolve-paused') return false;
                 if (downloadResolvedActive) return false;
@@ -463,7 +463,7 @@
                 return phase === 'download-paused' && downloadResolvedActive;
             }
             _computeShowDownloadStart(phase, processing) { return phase === 'resolve-done' && !processing; }
-            _computeShowDownloadResume(phase) { return phase === 'download-paused'; }
+            _computeShowDownloadResume(phase, downloadResolvedActive) { return phase === 'download-paused' && !downloadResolvedActive; }
             _computeShowImportButton(phase, processing) { return phase === 'idle' || phase === 'resolve-done'; }
             _computeShowExportButton(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
             _computeShowRetryFailed(phase, processing, urlCount) { return !processing && urlCount > 0 && phase !== 'resolving' && phase !== 'downloading'; }
@@ -775,6 +775,7 @@
                     let batchDelay = await this._db.getMeta('batchDelay');
                     let pageConcurrency = await this._db.getMeta('pageConcurrency');
                     let urlTimeout = await this._db.getMeta('urlTimeout');
+                    let downloadResolvedActive = await this._db.getMeta('downloadResolvedActive');
 
                     self._log('[IMPORT] Found saved queue: phase=' + phase + ', ' + urlCount + ' URLs');
                     self._log('[IMPORT] Cached ' + this._pageUrlCache.size + ' chapter page-URL sets in JS Map (out of Polymer scope)');
@@ -797,6 +798,8 @@
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
 
+
+                    if (downloadResolvedActive) this.set('_downloadResolvedActive', true);
 
                     this._processedIndex = 0;
                     this._downloadMangaIndex = 0;
@@ -848,6 +851,7 @@
                     await this._db.putMeta('batchDelay', this._batchDelay);
                     await this._db.putMeta('pageConcurrency', this._pageConcurrency);
                     await this._db.putMeta('urlTimeout', this._urlTimeout);
+                    await this._db.putMeta('downloadResolvedActive', this._downloadResolvedActive);
                 } catch(e) {
                     this._log('[IMPORT] Meta save failed: ' + e.message);
                 }
@@ -892,6 +896,7 @@
                 if (this._processing) return;
                 this.set('_phase', 'resolving');
                 this.set('_expandedUrl', null);
+                this.set('_downloadResolvedActive', false);
                 this._processUrls();
             }
 
@@ -1026,6 +1031,7 @@
                 this.set('_statusText', 'Paused (saving state...)');
                 await this._saveMeta();
                 this.set('_statusText', 'Paused');
+                this._log('[IMPORT] PAUSING COMPLETE');
             }
 
             async _onResetClick() {
