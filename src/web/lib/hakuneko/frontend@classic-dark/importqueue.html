@@ -803,6 +803,7 @@
                     }
                     if (restorePhase === 'downloading') restorePhase = 'download-paused';
                     if (restorePhase === 'resolving') restorePhase = 'resolve-paused';
+                    if (restorePhase === 'done') restorePhase = 'resolve-paused';
 
                     if (downloadResolvedActive) this.set('_downloadResolvedActive', true);
 
