@@ -1081,7 +1081,7 @@
             async _onMarkDoneClick() {
                 this._log('[IMPORT] -> Mark Done clicked (' + this._downloadProgressOk + ' OK, ' + this._downloadProgressFail + ' failed)');
                 if (this._processing) return;
-                this.set('_phase', 'done');
+                this.set('_phase', 'resolve-paused');
                 this.set('_statusText', 'Done: ' + this._downloadProgressOk + ' chapters downloaded, ' + this._downloadProgressFail + ' failed/missed.');
                 this.set('_progressPercent', 100);
                 await this._saveMeta();
